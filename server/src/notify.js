@@ -44,6 +44,7 @@ export async function notify(userIds, opts) {
         actions: (opts.actions || []).slice(0, 2),
         requireInteraction: !!opts.requireInteraction,
         from: opts.data?.from || null,
+        icon: opts.data?.from?.avatar ? `/art/avatars/${opts.data.from.avatar}.png` : undefined,
         ttl: opts.ttl,
         timestamp: Date.now(),
       }).catch((e) => console.warn('[push] error', e.message)));

@@ -4,6 +4,9 @@ import { get, post } from '../lib/api.js';
 import { useApp, useSocket, STATUS } from '../lib/store.jsx';
 import { Avatar, Orb, Icon, Sheet, TYPE_LABEL, reminderLabel } from '../components/ui.jsx';
 import { fmtRange, fmtTime, relDay, dayKey, ago } from '../lib/dates.js';
+import ArtPicker from '../components/ArtPicker.jsx';
+import RichText, { emojiOnly } from '../components/RichText.jsx';
+import { stickerUrl, gifUrl } from '../lib/art.js';
 
 /* Planner's plan suggestion, rendered as a notice card. */
 function PlanCard({ msg, members, onDone }) {
@@ -114,6 +117,7 @@ export function ChatView({ convId: id }) {
   const [thinking, setThinking] = useState(false);
   const [typing, setTyping] = useState(null);
   const [attach, setAttach] = useState(false);
+  const [picker, setPicker] = useState(false);
   const endRef = useRef(null);
   const inputRef = useRef(null);
   const lastTyping = useRef(0);
@@ -168,6 +172,22 @@ export function ChatView({ convId: id }) {
     } catch (x) { toast({ title: 'Not sent', body: x.message }); setText(body); }
   };
   const send = (e) => { e?.preventDefault(); sendText(text); inputRef.current?.focus(); };
+  // Emoji go into the text at the cursor; stickers and GIFs send at once.
+  const addEmoji = (eid) => {
+    const el = inputRef.current;
+    const at = el?.selectionStart ?? text.length;
+    const code = `:${eid}:`;
+    setText((t) => t.slice(0, at) + code + t.slice(at));
+    setPicker(false);
+    setTimeout(() => { el?.focus(); el?.setSelectionRange(at + code.length, at + code.length); }, 250);
+  };
+  const sendArt = async (kind, ref) => {
+    setPicker(false);
+    try {
+      const r = await post(`/conversations/${id}/messages`, { kind, ref });
+      setMsgs((x) => (x.some((y) => y.id === r.message.id) ? x : [...x, r.message]));
+    } catch (x) { toast({ title: 'Not sent', body: x.message }); }
+  };
 
   const planIt = async () => {
     setAttach(false);
@@ -248,13 +268,23 @@ export function ChatView({ convId: id }) {
           if (m.kind === 'plan') return [sep, <div key={m.id} className={`row-msg in ${first ? 'first' : ''} ${initialIds.current && !initialIds.current.has(m.id) ? 'pop' : ''}`}><PlanCard msg={m} members={planMembers} onDone={openEvent} /></div>];
           const ai = m.kind === 'ai';
           const isNew = initialIds.current && !initialIds.current.has(m.id);
+          if (m.kind === 'sticker' || m.kind === 'gif') return [sep, (
+            <div key={m.id} className={`row-msg ${mine ? 'out' : 'in'} ${first ? 'first' : ''} ${isNew ? 'pop' : ''}`}>
+              <div className={`media-msg ${m.kind}`}>
+                {first && !mine && conv.is_group && <span className="who" style={{ color: nameColor(m.sender) }}>{m.sender?.display_name}</span>}
+                <img src={m.kind === 'gif' ? gifUrl(m.data?.ref) : stickerUrl(m.data?.ref)} alt={m.body} draggable="false" />
+                <span className="meta">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>
+              </div>
+            </div>
+          )];
+          const big = !ai && emojiOnly(m.body);
           return [sep, (
             <div key={m.id} className={`row-msg ${mine ? 'out' : 'in'} ${first ? 'first' : ''} ${isNew ? 'pop' : ''}`}>
-              <div className={`bubble ${ai && !planner ? 'ai' : ''}`}>
+              <div className={`bubble ${ai && !planner ? 'ai' : ''} ${big ? `jumbo n${big}` : ''}`}>
                 {first && !mine && (conv.is_group || (ai && !planner)) && (
                   <span className="who" style={{ color: ai ? 'var(--accent)' : nameColor(m.sender) }}>{ai ? 'Planner' : m.sender?.display_name}</span>
                 )}
-                <span className="text">{ai ? <Reveal text={m.body} fresh={freshIds.current.has(m.id)} /> : m.body}</span>
+                <span className="text">{ai ? <Reveal text={m.body} fresh={freshIds.current.has(m.id)} /> : <RichText text={m.body} />}</span>
                 <span className="meta">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>
               </div>
             </div>
@@ -275,11 +305,13 @@ export function ChatView({ convId: id }) {
         <div className="input-pill">
           <input ref={inputRef} value={text} onChange={onType} enterKeyHint="send"
             placeholder={planner ? 'What should we plan?' : 'Message'} aria-label="Message" />
+          <button type="button" className="icon-plain sm muted-ic" onClick={() => setPicker(true)} aria-label="Emoji, stickers and GIFs"><Icon name="smile" size={24} /></button>
           {!planner && <button type="button" className="icon-plain sm" onClick={planIt} disabled={thinking} aria-label="Plan it with Planner"><Orb size={24} state={thinking ? 'thinking' : 'idle'} /></button>}
         </div>
         <button className={`send ${text.trim() ? 'ready' : ''}`} disabled={!text.trim()} aria-label="Send"><Icon name="send" size={20} /></button>
       </form>
 
+      <ArtPicker open={picker} onClose={() => setPicker(false)} onEmoji={addEmoji} onSend={sendArt} />
       <Sheet open={attach} onClose={() => setAttach(false)}>
         <div className="attach-grid">
           <button onClick={planIt}><span className="ai-tile"><Orb size={30} /></span>Plan it</button>

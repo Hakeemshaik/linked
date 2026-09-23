@@ -4,6 +4,7 @@ import { useApp, useSocket, STATUS } from '../lib/store.jsx';
 import { Avatar, Header, Sheet, Empty, Icon, Orb } from '../components/ui.jsx';
 import { fmtTime, dayKey, addDays } from '../lib/dates.js';
 import { shareInvite } from '../lib/share.js';
+import RichText from '../components/RichText.jsx';
 
 function when(iso) {
   if (!iso) return '';
@@ -70,7 +71,7 @@ export default function Chats() {
         {mine && <Icon name={read || others.some((u) => u.online) ? 'ticks' : 'tick'} size={16} className={`tick ${read ? 'read' : ''}`} />}
         {!mine && !!c.is_group && m.sender && <span>{m.sender.display_name.split(' ')[0]}: </span>}
         {!m.sender && m.kind === 'ai' && <span>Planner: </span>}
-        <span>{body}</span>
+        <span><RichText text={body} /></span>
       </>
     );
   };

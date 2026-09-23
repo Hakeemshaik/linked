@@ -15,7 +15,7 @@ const WEB = process.env.WEB_DIST || path.join(SERVER_DIR, '..', 'web', 'dist');
 if (fs.existsSync(WEB)) {
   app.use(express.static(WEB, {
     setHeaders: (res, file) => {
-      if (file.endsWith('sw.js') || file.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+      if (file.endsWith('sw.js') || file.endsWith('index.html') || file.endsWith('version.json')) res.setHeader('Cache-Control', 'no-cache');
     },
   }));
   app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(WEB, 'index.html')));

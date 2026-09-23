@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AVATARS, avatarUrl } from '../lib/art.js';
 import { NavLink, useLocation } from 'react-router-dom';
 import { STATUS, useApp } from '../lib/store.jsx';
 
@@ -38,6 +39,7 @@ const P = {
   arrowIn: <path d="M17 7 7 17M7 9v8h8" />,
   arrowOut: <path d="M7 17 17 7M9 7h8v8" />,
   more: <><circle cx="12" cy="5.5" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="12" cy="18.5" r="1.2" /></>,
+  smile: <><circle cx="12" cy="12" r="9" /><path d="M8.3 14.2c.9 1.3 2.2 2 3.7 2s2.8-.7 3.7-2" /><path d="M9 9.6h.01M15 9.6h.01" strokeWidth="2.6" /></>,
   userPlus: <><circle cx="9" cy="8.5" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0M19 8v6M16 11h6" /></>,
 };
 export function Icon({ name, size = 22, className = '' }) {
@@ -53,13 +55,15 @@ export function Orb({ size = 40, state = 'idle', className = '' }) {
   return <span className={`orb ${sm} ${state} ${className}`} style={{ width: size, height: size }} aria-hidden="true" />;
 }
 
+const PIC_IDS = new Set(AVATARS.map((a) => a.id));
 export function Avatar({ user, size = 40, showStatus = false }) {
   if (!user) return <Orb size={size} />;
   const initials = (user.display_name || user.username || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
   const st = STATUS[user.status] || STATUS.offline;
+  const pic = PIC_IDS.has(user.avatar);
   return (
-    <span className="avatar" style={{ width: size, height: size, '--hue': user.color, fontSize: size * 0.38 }}>
-      {initials}
+    <span className={`avatar ${pic ? 'pic' : ''}`} style={{ width: size, height: size, '--hue': user.color, fontSize: size * 0.38 }}>
+      {pic ? <img src={avatarUrl(user.avatar)} alt="" draggable="false" /> : initials}
       {showStatus && <span className="avatar-dot" style={{ background: st.color }} />}
     </span>
   );

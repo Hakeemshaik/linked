@@ -10,7 +10,7 @@ export const DATA_DIR = process.env.DATA_DIR || path.join(SERVER_DIR, 'data');
 export const dbKind = URL ? 'postgres' : 'local';
 
 const NOW = `(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`;
-const SCHEMA_VERSION = '2';
+const SCHEMA_VERSION = '3';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
@@ -145,6 +145,8 @@ CREATE TABLE IF NOT EXISTS relay (
 -- v2: a permanent invite code per person, so their invite link never changes or expires.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite_code ON users(invite_code);
+-- v3: a chosen profile picture (one of the app's own set, by id).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
 `;
 
 let driverP = null;
@@ -219,6 +221,7 @@ export const publicUser = (u) =>
     username: u.username,
     display_name: u.display_name,
     color: u.color,
+    avatar: u.avatar || null,
     status: u.status,
     status_text: u.status_text,
     last_seen: u.last_seen,

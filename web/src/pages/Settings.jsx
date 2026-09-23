@@ -4,17 +4,24 @@ import { APP_VERSION } from '../lib/update.js';
 import { useApp, STATUS } from '../lib/store.jsx';
 import { Avatar, Header, Icon, Sheet } from '../components/ui.jsx';
 import { disablePush } from '../lib/push.js';
+import { AVATARS } from '../lib/art.js';
 
 export default function Settings() {
   const { me, setMe, friends, navigate, unread, logout, toast } = useApp();
   const [editName, setEditName] = useState(false);
   const [name, setName] = useState(me?.display_name || '');
   const [statusOpen, setStatusOpen] = useState(false);
+  const [picOpen, setPicOpen] = useState(false);
   const [text, setText] = useState('');
   useEffect(() => { setText(me?.status_text || ''); }, [me?.status_text]);
   const st = STATUS[me?.status] || STATUS.available;
   const setStatus = async (status) => { const r = await patch('/me', { status }); setMe({ ...me, ...r.user }); };
   const saveStatus = async () => { const r = await patch('/me', { status_text: text }); setMe({ ...me, ...r.user }); setStatusOpen(false); };
+
+  const setPic = async (avatar) => {
+    try { const r = await patch('/me', { avatar }); setMe({ ...me, ...r.user }); setPicOpen(false); }
+    catch (e) { toast({ title: 'Could not save', body: e.message }); }
+  };
 
   const saveName = async () => {
     try { const r = await patch('/me', { display_name: name }); setMe({ ...me, ...r.user }); setEditName(false); }
@@ -34,15 +41,16 @@ export default function Settings() {
     <>
       <Header back="/" title="Settings" />
       <div className="group-list">
-        <button className="row-item profile" onClick={() => setEditName(true)}>
-          <Avatar user={me} size={64} />
-          <span className="grow">
+        <div className="row-item profile">
+          <button className="profile-pic" onClick={() => setPicOpen(true)} aria-label="Change profile picture">
+            <Avatar user={me} size={64} /><i><Icon name="edit" size={13} /></i>
+          </button>
+          <button className="grow plain profile-name" onClick={() => setEditName(true)}>
             <b className="big">{me?.display_name}</b>
             <small><span style={{ color: st.color, fontWeight: 700 }}>{st.label}</span>{me?.status_text && ` · ${me.status_text}`}</small>
             <small className="mono">@{me?.username}</small>
-          </span>
-          <Icon name="edit" size={20} className="muted" />
-        </button>
+          </button>
+        </div>
       </div>
 
       <div className="group-list">
@@ -76,6 +84,14 @@ export default function Settings() {
         </div>
       </Sheet>
 
+      <Sheet open={picOpen} onClose={() => setPicOpen(false)} title="Profile picture">
+        <div className="pic-grid">
+          {AVATARS.map((a) => (
+            <button key={a.id} className={me?.avatar === a.id ? 'on' : ''} onClick={() => setPic(a.id)} aria-label={a.name}><Avatar user={{ ...me, avatar: a.id }} size={64} /></button>
+          ))}
+        </div>
+        {me?.avatar && <button className="btn quiet block" onClick={() => setPic('')}>Use my initials instead</button>}
+      </Sheet>
       <Sheet open={editName} onClose={() => setEditName(false)} title="Your name">
         <div className="form">
           <input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} />

@@ -164,12 +164,17 @@ api.post('/invite-link/accept', wrap(async (req, res) => {
 
 api.get('/me', (req, res) => res.json({ user: publicUser(req.user) }));
 
+const ART_ID = /^[a-z]{2,20}$/; // ids of the app's own art (profile pictures, stickers, GIFs)
+
 api.patch('/me', wrap(async (req, res) => {
-  const { display_name, status, status_text } = req.body || {};
+  const { display_name, status, status_text, avatar } = req.body || {};
   if (status !== undefined && !STATUSES.includes(status)) return bad(res, 'Bad status');
+  if (avatar !== undefined && avatar !== '' && !ART_ID.test(avatar)) return bad(res, 'Bad picture');
   await run(
-    `UPDATE users SET display_name = COALESCE(?, display_name), status = COALESCE(?, status), status_text = COALESCE(?, status_text) WHERE id = ?`,
-    [display_name?.trim().slice(0, 40) || null, status ?? null, status_text !== undefined ? String(status_text).slice(0, 80) : null, req.user.id]
+    `UPDATE users SET display_name = COALESCE(?, display_name), status = COALESCE(?, status), status_text = COALESCE(?, status_text),
+       avatar = CASE WHEN ? THEN NULLIF(?, '') ELSE avatar END WHERE id = ?`,
+    [display_name?.trim().slice(0, 40) || null, status ?? null, status_text !== undefined ? String(status_text).slice(0, 80) : null,
+      avatar !== undefined, avatar ?? '', req.user.id]
   );
   await broadcastPresence(req.user.id);
   res.json({ user: publicUser(await getUser(req.user.id)) });
@@ -586,6 +591,10 @@ api.post('/conversations/:id/typing', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Lock screens can't show the app's own emoji, so notifications use the closest standard one.
+const EMOJI_TEXT = { love: '💜', lol: '😂', hype: '🔥', omw: '🏃', braai: '🍖', cheers: '🍻', free: '✅', meh: '😒', sleepy: '😴', party: '🎉' };
+const lockScreenText = (t) => t.replace(/:([a-z]+):/g, (m, id) => EMOJI_TEXT[id] || m);
+
 async function postMessage(convId, sender, kind, body, data = null) {
   const mid = id();
   const ts = now();
@@ -598,7 +607,7 @@ async function postMessage(convId, sender, kind, body, data = null) {
 
   const from = sender ? sender.display_name : 'Planner';
   let title = conv.is_group ? `${from} in ${conv.name || 'group chat'}` : from;
-  let text = body;
+  let text = kind === 'sticker' ? 'Sent a sticker' : kind === 'gif' ? 'Sent a GIF' : lockScreenText(body);
   if (kind === 'plan' && data?.plan) {
     const p = data.plan;
     title = `Planner suggested: ${p.title}`;
@@ -646,6 +655,12 @@ async function aiRespond(convId, requesterId, mode, instruction) {
 api.post('/conversations/:id/messages', wrap(async (req, res) => {
   const convId = req.params.id;
   if (!(await isMember(convId, req.user.id))) return bad(res, 'Not found', 404);
+  // Stickers and GIFs are the app's own art, sent by id.
+  const kind = ['sticker', 'gif'].includes(req.body?.kind) ? req.body.kind : 'text';
+  if (kind !== 'text') {
+    if (!ART_ID.test(req.body?.ref || '')) return bad(res, 'Unknown sticker');
+    return res.json({ message: await postMessage(convId, req.user, kind, kind === 'gif' ? 'GIF' : 'Sticker', { ref: req.body.ref }) });
+  }
   const body = String(req.body?.body || '').trim().slice(0, 4000);
   if (!body) return bad(res, 'Empty message');
   const msg = await postMessage(convId, req.user, 'text', body);

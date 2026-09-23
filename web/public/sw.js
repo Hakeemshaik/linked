@@ -52,7 +52,7 @@ self.addEventListener('push', (event) => {
   const actions = (p.actions || []).map((a) => ({ action: a.action, title: a.title }));
   const options = {
     body: p.body || '',
-    icon: '/icons/icon-192.png',
+    icon: p.icon || '/icons/icon-192.png',
     badge: '/icons/badge-96.png',
     tag: p.tag || p.id,
     renotify: true,

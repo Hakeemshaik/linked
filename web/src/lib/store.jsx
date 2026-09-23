@@ -41,7 +41,7 @@ export function AppProvider({ children, navigate }) {
 
   const toast = useCallback((t) => {
     const tid = Math.random().toString(36).slice(2);
-    setToasts((x) => [...x.slice(-2), { ...t, tid }]);
+    setToasts((x) => [...x.slice(-1), { ...t, tid }]); // at most two banners at once
     setTimeout(() => setToasts((x) => x.filter((y) => y.tid !== tid)), t.ms || 3800);
   }, []);
   const dismissToast = (tid) => setToasts((x) => x.filter((y) => y.tid !== tid));
