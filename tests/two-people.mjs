@@ -4,7 +4,7 @@ import fs from 'node:fs'; fs.mkdirSync('tests/shots', { recursive: true });
 import { chromium } from 'playwright';
 const B=process.env.APP_URL || 'http://localhost:8080';
 const CODE=process.env.REGISTRATION_CODE || '';
-const browser = await chromium.launch();
+const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 const mk=async(name)=>{const c=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:2,permissions:['clipboard-read','clipboard-write']});const p=await c.newPage();p.on('pageerror',e=>console.log(name,'ERR',e.message));return {c,p};};
 const {c:ca,p:A}=await mk('a'); const {c:cb,p:Bp}=await mk('b');
 const shot=(p,n)=>p.screenshot({path:'tests/shots/'+n+'.png'});

@@ -17,7 +17,7 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== location.origin) return;
-  if (url.pathname.startsWith('/api') || url.pathname.startsWith('/socket.io')) return;
+  if (url.pathname.startsWith('/api')) return;
 
   if (req.mode === 'navigate') {
     // Network first for the page, fall back to cached shell when offline.

@@ -2,7 +2,7 @@
 
 Linkup is a private messenger for a small friend group that plans for you. It's an installable PWA (no app store).
 Friends chat, see who's free, and video call. An AI called **Planner** turns chats into booked plans with reminders.
-Planner runs on the owner's local Ollama model.
+It's hosted on Vercel. Planner runs on the owner's local Ollama model, which Vercel reaches through `scripts/ollama-gate.js` and Tailscale Funnel.
 
 ## Hard rules
 - Never put any employer or company name anywhere: code, copy, comments, metadata, README, commits.
@@ -12,22 +12,31 @@ Planner runs on the owner's local Ollama model.
 - Keep it simple. Every screen should be obvious on first open. Prefer removing a control over adding one.
 
 ## Stack and layout
-- `server/` is Node 22, Express, Socket.io and better-sqlite3 (one file DB in `server/data/`), plus web-push (VAPID).
-  - `api.js` has every REST route: auth, invite links, friends, availability, events, conversations and messages, plan confirm, invites and calls, notifications, `/ai/*`.
-  - `index.js` handles sockets: presence, typing, read receipts and WebRTC call signalling (mesh, max 6).
-  - `ai.js` builds the context (calendar, schedules, chat), calls an OpenAI-compatible endpoint (Ollama), then runs `normalizePlan` and `findFreeSlot`.
+- `server/` is Node 22 and Express on Postgres, plus web-push (VAPID). The server is stateless: anything shared lives in the DB, so it runs as a Vercel function.
+  - `app.js` is the Express app. `api/index.js` exports it as the Vercel function. `index.js` serves it with the built PWA for `npm start`.
+  - `db.js`: `q`, `one` and `run` with `?` placeholders. `DATABASE_URL` (Neon) uses a pg pool; without it, embedded PGlite in `server/data/`. The schema is created on first request. Timestamps are ISO strings in TEXT columns.
+  - `api.js` has every REST route: auth, invite links, friends, availability, events, conversations and messages, typing, plan confirm, invites, call signalling (`/calls/:room/*`, WebRTC mesh, max 6), presence heartbeats, notifications, `/ai/*`, `/cron/reminders`, `/health`.
+  - `realtime.js`: `emitToUsers` sends over Pusher (a private channel per user). Without `PUSHER_*` it uses a local SSE stream. Payloads over 9KB are parked in the `relay` table. Presence comes from heartbeats (`users.visible`, `last_seen`), so "online" means on screen in the last 70s.
+  - `ai.js` builds the context (calendar, schedules, chat), calls an OpenAI-compatible endpoint (Ollama), then runs `normalizePlan` and `findFreeSlot`. Planner replies run after the response via `background()` (Vercel `waitUntil`).
   - `notify.js` is the one call that stores a notification, emits it live, and sends Web Push with the full content (skipped when the app is on screen).
-  - `scheduler.js` sends event reminders (checks every 30s).
+  - `scheduler.js` sends reminders through `runReminders()`, which is idempotent. Callers: QStash at each reminder time, the daily Vercel Cron, heartbeats, and a 30s timer under `npm start`.
+  - Secrets (VAPID keys, JWT secret) come from env, or are generated once and stored in the `kv` table.
 - `web/` is React, Vite and react-router, with plain CSS in `web/src/styles.css` (tokens at the top, light and dark via `prefers-color-scheme`).
   - Tabs: Chats (`/`), Calendar, Calls. Settings opens from the avatar on Chats and holds status, friends, plans, notifications and sign out.
   - Planner is a pinned chat (`conversations.is_ai = 1`). `openPlanner(draft)` in `lib/store.jsx` opens it with text ready to send.
+  - `lib/realtime.js` connects to Pusher or the SSE stream and exposes `on` and `off`. Everything the client sends goes through the REST API.
   - `public/sw.js` is the service worker: it shows the push content, handles action buttons, and caches the offline shell.
 - Auth uses JWTs stored in localStorage. Invite links are `/join/<signed token>`. Signing up or in from one makes both people friends and opens a DM. It also bypasses `REGISTRATION_CODE`.
 
+## Hosting
+- Vercel (main): the Root Directory is the repo root. `vercel.json` builds `web/`, routes `/api/*` to `api/index.js` (Frankfurt, 300s max) and runs a daily cron.
+  - Needs `DATABASE_URL` (Neon), `PUSHER_*`, `QSTASH_TOKEN`, `LLM_*` and `REGISTRATION_CODE`. `/api/health` shows what's connected.
+- All-in-one: run `npm start` on a machine behind HTTPS (Tailscale Funnel). It needs no other services.
+
 ## Commands
-- `npm run setup` installs everything and builds the web app.
+- `npm run setup` installs everything and builds the web app. A plain `npm install` also installs `web/` and `server/` (postinstall), which is what Vercel runs.
 - `npm start` serves the API and the built PWA on :8080.
-- Dev: run `npm run dev:server` and `npm run dev:web` together (Vite on :5173 proxies `/api` and sockets).
+- Dev: run `npm run dev:server` and `npm run dev:web` together (Vite on :5173 proxies `/api`).
 - End-to-end check (needs a fresh DB):
   1. Start the server: `DATA_DIR=/tmp/linkup-test REGISTRATION_CODE=test npm start`
   2. Run the test: `REGISTRATION_CODE=test npm run test:e2e`
@@ -37,6 +46,7 @@ Planner runs on the owner's local Ollama model.
 ## Conventions
 - Components are small and live in `web/src/pages/*` and `web/src/components/*`. Reuse `Header`, `Sheet`, `Avatar`, `Orb`, `Icon`, `.group-list` and `.row-item`.
 - Motion lives in the "Motion" block at the bottom of `styles.css`. Use `--spring` and `--ease-out`. Every animation must also work under `prefers-reduced-motion`.
-- Realtime: the server calls `emitToUsers(ids, event, payload)`, and clients subscribe with `useSocket(event, fn)`.
+- Realtime: the server calls `await emitToUsers(ids, event, payload)`, and clients subscribe with `useSocket(event, fn)`. Client-to-server messages are REST calls, never socket emits.
+- Serverless: don't keep state in module variables across requests. Await work before responding, or wrap it in `background()`.
 - Any new user-facing event should go through `notify()` so it gets an in-app toast, an Alerts entry and a push.
 - Before you say something works, run the e2e test and take screenshots at 390x844 in light and dark.
