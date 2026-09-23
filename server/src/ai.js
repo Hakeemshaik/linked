@@ -1,13 +1,14 @@
-import { db, memberIds, getUser } from './db.js';
+import { q, memberIds, getUser, getUsers } from './db.js';
 import { TZ, nextDays, zonedToDate, dateKey, timeKey } from './time.js';
 
 const BASE = (process.env.LLM_BASE_URL || 'http://localhost:11434/v1').replace(/\/$/, '');
 const MODEL = process.env.LLM_MODEL || 'llama3.2:3b';
 const KEY = process.env.LLM_API_KEY || 'ollama';
-const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS || 180000);
+// On Vercel the function itself stops at 300s, so give up on the model a little before that.
+const TIMEOUT = Math.min(Number(process.env.LLM_TIMEOUT_MS || 180000), process.env.VERCEL ? 280000 : Infinity);
 const JSON_MODE = process.env.LLM_JSON_MODE !== 'false';
 
-export const aiInfo = { base: BASE, model: MODEL };
+export const aiInfo = { base: BASE, model: MODEL, key: KEY };
 
 async function chat(messages) {
   const ctrl = new AbortController();
@@ -45,39 +46,32 @@ function extractJSON(text) {
   return null;
 }
 
-function scheduleContext(userIds, days) {
+async function scheduleContext(users, days) {
   const from = days[0].date;
   const to = days[days.length - 1].date;
   const lines = [];
-  for (const uid of userIds) {
-    const u = getUser(uid);
-    if (!u) continue;
-    const blocks = db
-      .prepare('SELECT * FROM availability WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date, start_time')
-      .all(uid, from, to)
+  for (const u of users) {
+    const uid = u.id;
+    const blocks = (await q('SELECT * FROM availability WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date, start_time NULLS FIRST', [uid, from, to]))
       .map((a) => `${a.date} ${a.kind}${a.start_time ? ` ${a.start_time}-${a.end_time}` : ' all day'}`);
-    const evs = db
-      .prepare(
-        `SELECT e.* FROM events e JOIN event_members m ON m.event_id = e.id
-         WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.end_at >= ? ORDER BY e.start_at LIMIT 15`
-      )
-      .all(uid, new Date().toISOString())
-      .map((e) => `${dateKey(e.start_at)} ${timeKey(e.start_at)} event "${e.title}"`);
+    const evs = (await q(
+      `SELECT e.* FROM events e JOIN event_members m ON m.event_id = e.id
+       WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.end_at >= ? ORDER BY e.start_at LIMIT 15`,
+      [uid, new Date().toISOString()]
+    )).map((e) => `${dateKey(e.start_at)} ${timeKey(e.start_at)} event "${e.title}"`);
     const all = [...blocks, ...evs];
     lines.push(`- ${u.display_name} (@${u.username}): ${all.length ? all.join('; ') : 'nothing blocked, free every day'}`);
   }
   return lines.join('\n');
 }
 
-function transcript(convId, limit = 40) {
-  const rows = db
-    .prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?')
-    .all(convId, limit)
-    .reverse();
+async function transcript(convId, limit = 40) {
+  const rows = (await q('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?', [convId, limit])).reverse();
+  const names = new Map((await getUsers(rows.map((m) => m.sender_id).filter(Boolean))).map((u) => [u.id, u.display_name]));
   return rows
     .map((m) => {
       if (m.kind === 'plan') return `Planner: [proposed a plan card]`;
-      const who = m.sender_id ? getUser(m.sender_id)?.display_name || 'Someone' : 'Planner';
+      const who = m.sender_id ? names.get(m.sender_id) || 'Someone' : 'Planner';
       return `${who}: ${m.body}`;
     })
     .join('\n');
@@ -109,13 +103,14 @@ Rules:
 - If people ask when others are free, answer from the schedules provided.`;
 
 export async function runAI(convId, { mode = 'reply', requesterId, instruction = '', memberIdsOverride, personal = false } = {}) {
-  const ids = memberIdsOverride || memberIds(convId);
-  const members = ids.map(getUser).filter(Boolean);
+  const ids = memberIdsOverride || (await memberIds(convId));
+  const byId = new Map((await getUsers(ids)).map((u) => [u.id, u]));
+  const members = ids.map((x) => byId.get(x)).filter(Boolean);
   const days = nextDays(21);
   const nowStr = new Intl.DateTimeFormat('en-GB', {
     timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit',
   }).format(new Date());
-  const requester = getUser(requesterId);
+  const requester = byId.get(requesterId) || (await getUser(requesterId));
 
   const context = `Now: ${nowStr} (${TZ}).
 Calendar (next 21 days):
@@ -125,8 +120,8 @@ ${mode === 'schedule' || personal ? `The user is ${requester?.display_name} (use
 ${members.map((m) => `- ${m.display_name} (username: ${m.username})`).join('\n')}
 
 Schedules (busy / work blocks and events already booked):
-${scheduleContext(ids, days)}
-${convId ? `\nChat so far:\n${transcript(convId) || '(empty)'}` : ''}`;
+${await scheduleContext(members, days)}
+${convId ? `\nChat so far:\n${(await transcript(convId)) || '(empty)'}` : ''}`;
 
   const who = requester?.display_name || 'A member';
   const ask = {
@@ -147,7 +142,7 @@ ${convId ? `\nChat so far:\n${transcript(convId) || '(empty)'}` : ''}`;
   const defaultIds = solo ? [requesterId] : null;
   return {
     reply: String(parsed.reply || '').slice(0, 1000),
-    plan: parsed.plan ? normalizePlan(parsed.plan, members, { defaultIds, requesterId: solo ? requesterId : null, from: searchFromHint(instruction) }) : null,
+    plan: parsed.plan ? await normalizePlan(parsed.plan, members, { defaultIds, requesterId: solo ? requesterId : null, from: searchFromHint(instruction) }) : null,
   };
 }
 
@@ -162,18 +157,19 @@ const WORK = [8 * 60, 17 * 60];
 const DEFAULT_REMINDER = { trip: 1440, meeting: 30, call: 15, hangout: 60, event: 60 };
 
 /** Busy intervals (minutes from local midnight) for a set of users on a date. */
-function busyIntervals(userIds, date) {
+async function busyIntervals(userIds, date) {
   const dayStart = zonedToDate(date, '00:00').getTime();
   const out = [];
   for (const uid of userIds) {
-    for (const b of db.prepare(`SELECT * FROM availability WHERE user_id = ? AND date = ? AND kind IN ('busy','work')`).all(uid, date)) {
+    for (const b of await q(`SELECT * FROM availability WHERE user_id = ? AND date = ? AND kind IN ('busy','work')`, [uid, date])) {
       // An all-day "work" block means office hours; evenings stay open. All-day "busy" blocks the whole day.
       out.push(b.start_time ? [toMin(b.start_time), toMin(b.end_time)] : b.kind === 'work' ? [WORK[0], WORK[1]] : [0, 1440]);
     }
-    const evs = db.prepare(
+    const evs = await q(
       `SELECT e.start_at, e.end_at FROM events e JOIN event_members m ON m.event_id = e.id
-       WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.start_at < ? AND e.end_at > ?`
-    ).all(uid, new Date(dayStart + 86400000).toISOString(), new Date(dayStart).toISOString());
+       WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.start_at < ? AND e.end_at > ?`,
+      [uid, new Date(dayStart + 86400000).toISOString(), new Date(dayStart).toISOString()]
+    );
     for (const e of evs) {
       out.push([Math.max(0, (Date.parse(e.start_at) - dayStart) / 60000), Math.min(1440, (Date.parse(e.end_at) - dayStart) / 60000)]);
     }
@@ -182,8 +178,8 @@ function busyIntervals(userIds, date) {
 }
 
 /** First slot on `date` where everyone is free, searching from `from` in 30-min steps. */
-export function findFreeSlot(userIds, date, durationMin, from = '09:00', until = '22:00') {
-  const busy = busyIntervals(userIds, date);
+export async function findFreeSlot(userIds, date, durationMin, from = '09:00', until = '22:00') {
+  const busy = await busyIntervals(userIds, date);
   let start = toMin(from);
   const nowMin = date === dateKey(new Date()) ? toMin(timeKey(new Date())) + 30 : 0;
   start = Math.max(start, Math.ceil(nowMin / 30) * 30);
@@ -203,7 +199,7 @@ export function searchFromHint(text = '') {
   return null;
 }
 
-export function normalizePlan(p, members, { defaultIds = null, requesterId = null, from: hintFrom = null } = {}) {
+export async function normalizePlan(p, members, { defaultIds = null, requesterId = null, from: hintFrom = null } = {}) {
   const type = TYPES.includes(p.type) ? p.type : 'hangout';
   const today = dateKey(new Date());
   const date = isDate(p.date) && p.date >= today ? p.date : null;
@@ -223,7 +219,7 @@ export function normalizePlan(p, members, { defaultIds = null, requesterId = nul
   let autoPicked = false;
   if (!start && date && !endDate) {
     const from = hintFrom || (type === 'meeting' ? '09:00' : type === 'call' ? '17:00' : '10:00');
-    start = findFreeSlot(pids, date, duration, from) || findFreeSlot(pids, date, Math.min(duration, 60), from);
+    start = (await findFreeSlot(pids, date, duration, from)) || (await findFreeSlot(pids, date, Math.min(duration, 60), from));
     autoPicked = !!start;
   }
   start = start || dStart;
@@ -251,19 +247,19 @@ export function normalizePlan(p, members, { defaultIds = null, requesterId = nul
   if (date) {
     plan.start_at = zonedToDate(date, start).toISOString();
     plan.end_at = zonedToDate(endDate || date, end).toISOString();
-    plan.conflicts = conflictsFor(pids, date, endDate || date, plan.start_at, plan.end_at);
+    plan.conflicts = await conflictsFor(pids, date, endDate || date, plan.start_at, plan.end_at);
   }
   return plan;
 }
 
 /** Who is busy during the plan window (blocks or other events). */
-export function conflictsFor(userIds, from, to, startISO, endISO) {
+export async function conflictsFor(userIds, from, to, startISO, endISO) {
   const out = [];
   const s = startISO ? Date.parse(startISO) : null;
   const e = endISO ? Date.parse(endISO) : null;
   for (const uid of userIds) {
     const details = [];
-    for (const r of db.prepare(`SELECT * FROM availability WHERE user_id = ? AND date BETWEEN ? AND ? AND kind IN ('busy','work')`).all(uid, from, to)) {
+    for (const r of await q(`SELECT * FROM availability WHERE user_id = ? AND date BETWEEN ? AND ? AND kind IN ('busy','work')`, [uid, from, to])) {
       const win = r.start_time ? [r.start_time, r.end_time] : r.kind === 'work' ? [toHHMM(WORK[0]), toHHMM(WORK[1])] : null;
       if (s && win) {
         const bs = zonedToDate(r.date, win[0]).getTime();
@@ -273,12 +269,13 @@ export function conflictsFor(userIds, from, to, startISO, endISO) {
       details.push(`${r.kind === 'work' ? 'working' : 'busy'}${win ? ` ${win[0]}-${win[1]}` : ' all day'}`);
     }
     if (s) {
-      for (const ev of db.prepare(
+      for (const ev of await q(
         `SELECT e.title, e.start_at, e.end_at FROM events e JOIN event_members m ON m.event_id = e.id
-         WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.start_at < ? AND e.end_at > ?`
-      ).all(uid, new Date(e).toISOString(), new Date(s).toISOString())) details.push(`"${ev.title}" at ${timeKey(ev.start_at)}`);
+         WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.start_at < ? AND e.end_at > ?`,
+        [uid, new Date(e).toISOString(), new Date(s).toISOString()]
+      )) details.push(`"${ev.title}" at ${timeKey(ev.start_at)}`);
     }
-    if (details.length) out.push({ user_id: uid, name: getUser(uid)?.display_name, detail: details.join(', ') });
+    if (details.length) out.push({ user_id: uid, name: (await getUser(uid))?.display_name, detail: details.join(', ') });
   }
   return out;
 }

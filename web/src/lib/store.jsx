@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
 import { get, post, getToken, setToken } from './api.js';
+import { connectRealtime } from './realtime.js';
 import { registerSW, syncPush } from './push.js';
 
 const Ctx = createContext(null);
@@ -33,8 +33,8 @@ export function AppProvider({ children, navigate }) {
     if (!cid) { const r = await get('/conversations'); cid = r.conversations.find((c) => c.is_ai)?.id; setAiConvId(cid); }
     if (cid) navRef.current(`/chat/${cid}${draft ? `?draft=${encodeURIComponent(draft)}` : ''}`);
   }, []);
-  const socketRef = useRef(null);
-  const [socket, setSocket] = useState(null);
+  const rtRef = useRef(null);
+  const [rt, setRt] = useState(null);
   const navRef = useRef(navigate);
   navRef.current = navigate;
 
@@ -55,7 +55,7 @@ export function AppProvider({ children, navigate }) {
     setToken(t); setTok(t); setMe(user);
     if (!location.pathname.startsWith('/join/')) navRef.current('/', { replace: true });
   };
-  const logout = () => { setToken(null); setTok(null); setMe(null); socketRef.current?.disconnect(); navRef.current('/', { replace: true }); };
+  const logout = () => { post('/presence', { visible: false }, { keepalive: true }).catch(() => {}); setToken(null); setTok(null); setMe(null); navRef.current('/', { replace: true }); };
 
   useEffect(() => {
     registerSW();
@@ -75,21 +75,23 @@ export function AppProvider({ children, navigate }) {
     get('/me').then((r) => setMe(r.user)).catch(() => {});
     loadFriends();
     loadUnread();
+  }, [token]); // eslint-disable-line
 
-    const s = io({ auth: { token }, transports: ['websocket', 'polling'] });
-    socketRef.current = s;
-    setSocket(s);
-    const vis = () => s.emit('visibility', { visible: document.visibilityState === 'visible' });
-    // On every (re)connect: report visibility and pick up any invite that rang while we were offline.
+  // Live events, once we know who we are and how the server delivers them.
+  const meId = me?.id;
+  const rtKey = config && JSON.stringify(config.realtime);
+  useEffect(() => {
+    if (!token || !meId || !rtKey) return;
+    const s = connectRealtime(config.realtime, meId);
+    rtRef.current = s;
+    setRt(s);
+    // On every (re)connect: pick up any invite that rang while we were offline.
     s.on('connect', () => {
-      vis();
       get('/invites').then((r) => {
         const fresh = r.invites.find((i) => Date.now() - Date.parse(i.created_at) < 90000);
         if (fresh) setIncoming((cur) => cur || fresh);
       }).catch(() => {});
     });
-    document.addEventListener('visibilitychange', vis);
-
     s.on('presence', (p) => {
       if (p.self) { setMe((m) => (m ? { ...m, ...p } : m)); return; }
       setFriends((f) => ({ ...f, friends: f.friends.map((x) => (x.id === p.id ? p : x)) }));
@@ -105,8 +107,29 @@ export function AppProvider({ children, navigate }) {
       toast({ title: n.title, body: n.body, url: n.url });
     });
     s.on('invite', (inv) => setIncoming(inv));
-    return () => { document.removeEventListener('visibilitychange', vis); s.disconnect(); };
-  }, [token]); // eslint-disable-line
+    return () => { s.disconnect(); rtRef.current = null; setRt(null); };
+  }, [token, meId, rtKey]); // eslint-disable-line
+
+  // Presence: a heartbeat every 45s while the app is on screen, one more when it's hidden.
+  // The reply carries friends' presence, so someone whose phone died drops to "last seen" too.
+  const friendsRef = useRef(friends);
+  friendsRef.current = friends;
+  useEffect(() => {
+    if (!token) return;
+    const beat = () => {
+      const visible = document.visibilityState === 'visible';
+      post('/presence', { visible }, { keepalive: !visible }).then((r) => {
+        for (const p of r.friends || []) {
+          const cur = friendsRef.current.friends.find((f) => f.id === p.id);
+          if (cur && (cur.online !== p.online || cur.status !== p.status)) rtRef.current?.emitLocal('presence', p);
+        }
+      }).catch(() => {});
+    };
+    beat();
+    const t = setInterval(() => document.visibilityState === 'visible' && beat(), 45000);
+    document.addEventListener('visibilitychange', beat);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', beat); };
+  }, [token]);
 
   useEffect(() => {
     if (token && config) syncPush(config.vapidPublicKey);
@@ -121,23 +144,23 @@ export function AppProvider({ children, navigate }) {
 
   const value = useMemo(() => ({
     token, me, setMe, config, friends, loadFriends, unread, setUnread, chatUnread, setChatUnread, loadUnread,
-    toasts, toast, dismissToast, incoming, setIncoming, socket, login, logout, navigate, openPlanner, aiConvId,
-  }), [token, me, config, friends, unread, chatUnread, toasts, incoming, socket, navigate, aiConvId]); // eslint-disable-line
+    toasts, toast, dismissToast, incoming, setIncoming, rt, login, logout, navigate, openPlanner, aiConvId,
+  }), [token, me, config, friends, unread, chatUnread, toasts, incoming, rt, navigate, aiConvId]); // eslint-disable-line
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-/** Subscribe to a socket event for the lifetime of a component. */
+/** Subscribe to a live event for the lifetime of a component. */
 export function useSocket(event, handler) {
-  const { socket } = useApp();
+  const { rt } = useApp();
   const ref = useRef(handler);
   ref.current = handler;
   useEffect(() => {
-    if (!socket) return;
+    if (!rt) return;
     const fn = (...a) => ref.current(...a);
-    socket.on(event, fn);
-    return () => socket.off(event, fn);
-  }, [socket, event]);
+    rt.on(event, fn);
+    return () => rt.off(event, fn);
+  }, [rt, event]);
 }
 
 export const friendName = (friends, uid) => friends.friends.find((f) => f.id === uid)?.display_name;

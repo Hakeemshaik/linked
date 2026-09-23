@@ -1,16 +1,18 @@
-import { db, id } from './db.js';
-import { emitToUser, isVisible } from './realtime.js';
+import { run, id } from './db.js';
+import { emitToUser, visibleUserIds } from './realtime.js';
 import { sendPush } from './push.js';
 
 /**
- * Create a notification for each user: store it, deliver in-app via socket,
- * and send a Web Push with the full content when the app isn't open on screen.
+ * Create a notification for each user: store it, deliver in-app live, and send a Web Push
+ * with the full content when the app isn't open on screen.
  *
- * opts: { kind, title, body, url, data, actions: [{action,title,url}], tag, requireInteraction, alwaysPush }
+ * opts: { kind, title, body, url, data, actions: [{action,title,url}], tag, requireInteraction, alwaysPush, store }
  */
 export async function notify(userIds, opts) {
-  const out = [];
-  for (const uid of new Set(userIds)) {
+  const ids = [...new Set(userIds)].filter(Boolean);
+  if (!ids.length) return [];
+  const onScreen = opts.alwaysPush ? new Set() : await visibleUserIds(ids);
+  return Promise.all(ids.map(async (uid) => {
     const n = {
       id: id(),
       user_id: uid,
@@ -23,16 +25,15 @@ export async function notify(userIds, opts) {
       created_at: new Date().toISOString(),
     };
     if (opts.store !== false) {
-      db.prepare(
-        'INSERT INTO notifications (id, user_id, kind, title, body, url, data, read, created_at) VALUES (?,?,?,?,?,?,?,?,?)'
-      ).run(n.id, uid, n.kind, n.title, n.body, n.url, JSON.stringify(n.data), 0, n.created_at);
+      await run(
+        'INSERT INTO notifications (id, user_id, kind, title, body, url, data, read, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        [n.id, uid, n.kind, n.title, n.body, n.url, JSON.stringify(n.data), 0, n.created_at]
+      );
     }
-    emitToUser(uid, 'notification', n);
-
-    // If the app is open and visible on any device, the in-app toast/ring handles it.
-    // Otherwise send a real push notification with the actual content.
-    if (opts.alwaysPush || !isVisible(uid)) {
-      sendPush(uid, {
+    const jobs = [emitToUser(uid, 'notification', n)];
+    // If the app is on screen, the in-app toast/ring handles it. Otherwise send a real push with the actual content.
+    if (!onScreen.has(uid)) {
+      jobs.push(sendPush(uid, {
         id: n.id,
         title: n.title,
         body: n.body,
@@ -42,9 +43,9 @@ export async function notify(userIds, opts) {
         actions: (opts.actions || []).slice(0, 2),
         requireInteraction: !!opts.requireInteraction,
         timestamp: Date.now(),
-      }).catch((e) => console.warn('[push] error', e.message));
+      }).catch((e) => console.warn('[push] error', e.message)));
     }
-    out.push(n);
-  }
-  return out;
+    await Promise.all(jobs);
+    return n;
+  }));
 }

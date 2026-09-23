@@ -7,7 +7,6 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api': 'http://localhost:8080',
-      '/socket.io': { target: 'http://localhost:8080', ws: true },
     },
   },
 });

@@ -106,7 +106,7 @@ function lastSeen(u) {
 }
 
 export function ChatView({ convId: id }) {
-  const { me, friends, navigate, toast, loadUnread, socket } = useApp();
+  const { me, friends, navigate, toast, loadUnread } = useApp();
   const [qs, setQs] = useSearchParams();
   const [conv, setConv] = useState(null);
   const [msgs, setMsgs] = useState([]);
@@ -153,7 +153,7 @@ export function ChatView({ convId: id }) {
 
   const onType = (e) => {
     setText(e.target.value);
-    if (Date.now() - lastTyping.current > 2000) { lastTyping.current = Date.now(); socket?.emit('typing', { conversation_id: id }); }
+    if (Date.now() - lastTyping.current > 2000) { lastTyping.current = Date.now(); post(`/conversations/${id}/typing`).catch(() => {}); }
   };
 
   const sendText = async (body) => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useApp } from '../lib/store.jsx';
+import { post } from '../lib/api.js';
 import { Avatar, Icon } from '../components/ui.jsx';
 
 function Video({ stream, muted, mirror, hidden }) {
@@ -11,9 +12,9 @@ function Video({ stream, muted, mirror, hidden }) {
 
 export default function Call() {
   const { room } = useParams();
-  const { socket, config, me, navigate } = useApp();
+  const { rt, config, me, navigate } = useApp();
   const [local, setLocal] = useState(null);
-  const [peers, setPeers] = useState([]); // [{ socketId, user, stream, mic, cam, state }]
+  const [peers, setPeers] = useState([]); // [{ peerId, user, stream, mic, cam, state }]
   const [mic, setMic] = useState(true);
   const [cam, setCam] = useState(true);
   const [facing, setFacing] = useState('user');
@@ -22,56 +23,66 @@ export default function Call() {
   const [, tick] = useState(0);
   const pcs = useRef(new Map());
   const localRef = useRef(null);
+  const selfRef = useRef(null); // this browser's peer id in the call
 
-  const upsert = (socketId, patch) => setPeers((list) => {
-    const i = list.findIndex((p) => p.socketId === socketId);
-    if (i === -1) return [...list, { socketId, mic: true, cam: true, ...patch }];
+  const upsert = (peerId, patch) => setPeers((list) => {
+    const i = list.findIndex((p) => p.peerId === peerId);
+    if (i === -1) return [...list, { peerId, mic: true, cam: true, ...patch }];
     const copy = [...list]; copy[i] = { ...copy[i], ...patch }; return copy;
   });
 
   useEffect(() => { const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t); }, []);
 
   useEffect(() => {
-    if (!socket || !config) return;
+    if (!rt || !config) return;
     let cancelled = false;
     const iceServers = config.iceServers;
+    const api = (what, body = {}, opts) => post(`/calls/${room}/${what}`, { from: selfRef.current, ...body }, opts);
 
-    const signal = (to, data) => socket.emit('call:signal', { to, data });
+    const signal = (to, data) => api('signal', { to, data }).catch(() => {});
+    // ICE candidates come in bursts; send each burst as one message.
+    const outbox = new Map();
+    const sendCandidate = (to, candidate) => {
+      if (!outbox.has(to)) { outbox.set(to, []); setTimeout(() => { const c = outbox.get(to); outbox.delete(to); signal(to, { candidates: c }); }, 150); }
+      outbox.get(to).push(candidate);
+    };
 
-    const makePeer = (socketId, user, initiator) => {
-      if (pcs.current.has(socketId)) return pcs.current.get(socketId);
+    const makePeer = (peerId, user, initiator) => {
+      if (pcs.current.has(peerId)) return pcs.current.get(peerId);
       const pc = new RTCPeerConnection({ iceServers });
       const entry = { pc, pending: [], user, initiator };
-      pcs.current.set(socketId, entry);
+      pcs.current.set(peerId, entry);
       localRef.current?.getTracks().forEach((t) => pc.addTrack(t, localRef.current));
-      pc.onicecandidate = (e) => e.candidate && signal(socketId, { candidate: e.candidate });
-      pc.ontrack = (e) => upsert(socketId, { stream: e.streams[0] });
+      pc.onicecandidate = (e) => e.candidate && sendCandidate(peerId, e.candidate);
+      pc.ontrack = (e) => upsert(peerId, { stream: e.streams[0] });
       pc.onconnectionstatechange = async () => {
-        upsert(socketId, { state: pc.connectionState });
+        upsert(peerId, { state: pc.connectionState });
         if (pc.connectionState === 'failed' && entry.initiator) {
           const offer = await pc.createOffer({ iceRestart: true });
           await pc.setLocalDescription(offer);
-          signal(socketId, { sdp: pc.localDescription });
+          signal(peerId, { sdp: pc.localDescription });
         }
       };
-      upsert(socketId, { user, state: 'connecting' });
+      upsert(peerId, { user, state: 'connecting' });
       if (initiator) {
         (async () => {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
-          signal(socketId, { sdp: pc.localDescription });
+          signal(peerId, { sdp: pc.localDescription });
         })().catch(console.warn);
       }
       return entry;
     };
 
-    const drop = (socketId) => {
-      pcs.current.get(socketId)?.pc.close();
-      pcs.current.delete(socketId);
-      setPeers((l) => l.filter((p) => p.socketId !== socketId));
+    const drop = (peerId) => {
+      pcs.current.get(peerId)?.pc.close();
+      pcs.current.delete(peerId);
+      setPeers((l) => l.filter((p) => p.peerId !== peerId));
     };
 
-    const onSignal = async ({ from, data }) => {
+    const mine = (p) => p.room === room && selfRef.current && p.peerId !== selfRef.current;
+    const onSignal = async ({ room: r, from, to, data }) => {
+      if (r !== room || to !== selfRef.current) return;
       const entry = pcs.current.get(from) || makePeer(from, null, false);
       const { pc } = entry;
       try {
@@ -83,16 +94,19 @@ export default function Call() {
             signal(from, { sdp: pc.localDescription });
           }
           for (const c of entry.pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
-        } else if (data.candidate) {
-          if (pc.remoteDescription) await pc.addIceCandidate(data.candidate).catch(() => {});
-          else entry.pending.push(data.candidate);
+        }
+        for (const c of data.candidates || []) {
+          if (pc.remoteDescription) await pc.addIceCandidate(c).catch(() => {});
+          else entry.pending.push(c);
         }
       } catch (e) { console.warn('signal error', e); }
     };
-    const onJoined = ({ socketId, user }) => makePeer(socketId, user, false);
-    const onLeft = ({ socketId }) => drop(socketId);
-    const onMedia = ({ socketId, mic: m, cam: c }) => upsert(socketId, { mic: m, cam: c });
+    const onJoined = (p) => mine(p) && makePeer(p.peerId, p.user, false);
+    const onLeft = (p) => mine(p) && drop(p.peerId);
+    const onMedia = (p) => mine(p) && upsert(p.peerId, { mic: p.mic, cam: p.cam });
 
+    let ping;
+    const leave = () => { if (selfRef.current) api('leave', {}, { keepalive: true }).catch(() => {}); selfRef.current = null; };
     (async () => {
       let stream;
       try {
@@ -104,41 +118,46 @@ export default function Call() {
       if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
       localRef.current = stream;
       setLocal(stream);
-      socket.on('call:signal', onSignal);
-      socket.on('call:peer-joined', onJoined);
-      socket.on('call:peer-left', onLeft);
-      socket.on('call:media', onMedia);
-      socket.emit('call:join', { room }, (res) => {
-        if (cancelled) return;
-        if (res?.error) { setError(res.error); return; }
-        res.peers.forEach((p) => makePeer(p.socketId, p.user, true));
-      });
+      rt.on('call:signal', onSignal);
+      rt.on('call:peer-joined', onJoined);
+      rt.on('call:peer-left', onLeft);
+      rt.on('call:media', onMedia);
+      try {
+        const res = await post(`/calls/${room}/join`);
+        if (cancelled) { selfRef.current = res.self; leave(); return; }
+        selfRef.current = res.self;
+        res.peers.forEach((p) => makePeer(p.peerId, p.user, true));
+        ping = setInterval(() => api('ping').catch(() => {}), 15000);
+      } catch (e) { setError(e.message); }
     })();
+    window.addEventListener('pagehide', leave);
 
     return () => {
       cancelled = true;
-      socket.emit('call:leave');
-      socket.off('call:signal', onSignal);
-      socket.off('call:peer-joined', onJoined);
-      socket.off('call:peer-left', onLeft);
-      socket.off('call:media', onMedia);
+      clearInterval(ping);
+      window.removeEventListener('pagehide', leave);
+      leave();
+      rt.off('call:signal', onSignal);
+      rt.off('call:peer-joined', onJoined);
+      rt.off('call:peer-left', onLeft);
+      rt.off('call:media', onMedia);
       pcs.current.forEach(({ pc }) => pc.close());
       pcs.current.clear();
       localRef.current?.getTracks().forEach((t) => t.stop());
       localRef.current = null;
       setPeers([]);
     };
-  }, [socket, config, room]);
+  }, [rt, config, room]);
 
   const toggleMic = () => {
     const v = !mic; setMic(v);
     localRef.current?.getAudioTracks().forEach((t) => (t.enabled = v));
-    socket.emit('call:media', { mic: v, cam });
+    post(`/calls/${room}/media`, { from: selfRef.current, mic: v, cam }).catch(() => {});
   };
   const toggleCam = () => {
     const v = !cam; setCam(v);
     localRef.current?.getVideoTracks().forEach((t) => (t.enabled = v));
-    socket.emit('call:media', { mic, cam: v });
+    post(`/calls/${room}/media`, { from: selfRef.current, mic, cam: v }).catch(() => {});
   };
   const flip = async () => {
     const next = facing === 'user' ? 'environment' : 'user';
@@ -169,7 +188,7 @@ export default function Call() {
           </div>
         )}
         {peers.map((p) => (
-          <div key={p.socketId} className="tile">
+          <div key={p.peerId} className="tile">
             {p.stream && <Video stream={p.stream} hidden={p.cam === false} />}
             {(!p.stream || p.cam === false) && <div className="tile-avatar"><Avatar user={p.user} size={80} /></div>}
             <span className="tile-name">{p.user?.display_name || 'Friend'}{p.mic === false ? ' · muted' : ''}{p.state && p.state !== 'connected' ? ` · ${p.state}` : ''}</span>
