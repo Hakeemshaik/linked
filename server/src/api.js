@@ -10,7 +10,7 @@ import {
 } from './realtime.js';
 import { notify } from './notify.js';
 import { vapid, saveSubscription, removeSubscription, sendPush } from './push.js';
-import { runAI, normalizePlan, aiInfo } from './ai.js';
+import { runAI, normalizePlan, aiInfo, aiErrorText, aiHeaders, aiMisconfigured } from './ai.js';
 import { formatWhen, zonedToDate, TZ } from './time.js';
 import { remindAt, scheduleReminder, runReminders, queueUpcoming, maybeRunReminders, remindersKind } from './scheduler.js';
 import { background } from './background.js';
@@ -49,7 +49,7 @@ api.get('/health', wrap(async (req, res) => {
     database: `${dbKind === 'postgres' ? 'postgres' : 'local (embedded)'}: ${database}`,
     realtime: { pusher: 'pusher', sse: 'local stream', none: 'missing: set the PUSHER_* variables' }[realtimeKind],
     reminders: { qstash: 'qstash + daily sweep', timer: 'local timer', 'cron-only': 'daily sweep only: set QSTASH_TOKEN for on-time reminders' }[remindersKind],
-    planner: aiInfo.model,
+    planner: aiMisconfigured ? 'not set: add LLM_BASE_URL (your tunnel URL ending in /v1) and redeploy' : aiInfo.model,
   });
 }));
 
@@ -632,7 +632,7 @@ async function aiRespond(convId, requesterId, mode, instruction) {
     else if (mode === 'plan' && !reply) await postMessage(convId, null, 'ai', "I couldn't find a plan in the chat yet. Mention what, when and where and tap Plan it again.");
   } catch (e) {
     console.warn('[ai] error', e.message);
-    await postMessage(convId, null, 'ai', `I'm offline right now (${e.name === 'AbortError' ? 'timed out' : 'cannot reach the model'}). Try again in a bit.`);
+    await postMessage(convId, null, 'ai', `I'm offline right now (${aiErrorText(e)}). Try again in a bit.`);
   } finally {
     await run('UPDATE conversations SET ai_busy_until = NULL WHERE id = ?', [convId]);
     await emitToUsers(members, 'ai:thinking', { conversation_id: convId, on: false });
@@ -848,14 +848,15 @@ api.post('/ai/schedule', wrap(async (req, res) => {
     res.json(out);
   } catch (e) {
     console.warn('[ai] schedule error', e.message);
-    res.status(503).json({ error: e.name === 'AbortError' ? 'Planner timed out, try again' : 'Planner is offline (cannot reach the model)' });
+    res.status(503).json({ error: `Planner is offline (${aiErrorText(e)})` });
   }
 }));
 
 // ---------- AI status ----------
 api.get('/ai/status', wrap(async (req, res) => {
   try {
-    const r = await fetch(`${aiInfo.base}/models`, { headers: { Authorization: `Bearer ${aiInfo.key}` }, signal: AbortSignal.timeout(4000) });
+    if (aiMisconfigured) return res.json({ online: false, model: aiInfo.model });
+    const r = await fetch(`${aiInfo.base}/models`, { headers: aiHeaders, signal: AbortSignal.timeout(4000) });
     res.json({ online: r.ok, model: aiInfo.model });
   } catch {
     res.json({ online: false, model: aiInfo.model });

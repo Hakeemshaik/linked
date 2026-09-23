@@ -40,6 +40,8 @@ Everything runs on Vercel except the Planner model, which stays on your PC (step
    tailscale funnel --bg 11435     # -> https://<your-pc>.<tailnet>.ts.net
    ```
    In Vercel, add `LLM_BASE_URL=https://<your-pc>.<tailnet>.ts.net/v1`, `LLM_MODEL=qwen2.5:7b` and the same `LLM_API_KEY`. When the PC is off, everything still works except Planner, which says it's offline.
+
+   **LM Studio or ngrok instead:** LM Studio listens on port 1234, so also set `OLLAMA_URL=http://127.0.0.1:1234` in `.env` before `npm run gate`. With ngrok, run `ngrok http 11435` and use its `https://…ngrok-free.dev/v1` address. Always tunnel the gate (port 11435), never the model's own port: otherwise anyone who finds the address can use your model. `LLM_MODEL` must be the model name LM Studio shows (for example `qwen2.5-7b-instruct`).
 6. **Sign-up code.** Add `REGISTRATION_CODE` in Vercel. People need it to sign up without an invite link.
 7. **Deploy.** Vercel deploys production from the repo's default branch, so merge this code into it, or set **Settings, Environments, Production, Branch** to the branch you want live. Reminders call back to the production address, so production has to be live. Then open `https://<your-app>.vercel.app/api/health`. It should show `postgres: ok`, `realtime: pusher` and `qstash + daily sweep`.
 

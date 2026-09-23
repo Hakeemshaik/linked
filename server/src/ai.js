@@ -6,32 +6,51 @@ const MODEL = process.env.LLM_MODEL || 'llama3.2:3b';
 const KEY = process.env.LLM_API_KEY || 'ollama';
 // On Vercel the function itself stops at 300s, so give up on the model a little before that.
 const TIMEOUT = Math.min(Number(process.env.LLM_TIMEOUT_MS || 180000), process.env.VERCEL ? 280000 : Infinity);
-const JSON_MODE = process.env.LLM_JSON_MODE !== 'false';
+let jsonMode = process.env.LLM_JSON_MODE !== 'false';
 
 export const aiInfo = { base: BASE, model: MODEL, key: KEY };
+// On Vercel, a localhost model URL can only mean LLM_BASE_URL was never set.
+export const aiMisconfigured = !!process.env.VERCEL && /^https?:\/\/(localhost|127\.|0\.0\.0\.0)/.test(BASE);
+// Sent on every call: ngrok's free tunnels show a warning page unless asked not to.
+export const aiHeaders = { Authorization: `Bearer ${KEY}`, 'ngrok-skip-browser-warning': '1' };
 
 async function chat(messages) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT);
+  const send = () => fetch(`${BASE}/chat/completions`, {
+    method: 'POST',
+    signal: ctrl.signal,
+    headers: { 'Content-Type': 'application/json', ...aiHeaders },
+    body: JSON.stringify({
+      model: MODEL,
+      messages,
+      temperature: 0.2,
+      stream: false,
+      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+    }),
+  });
   try {
-    const res = await fetch(`${BASE}/chat/completions`, {
-      method: 'POST',
-      signal: ctrl.signal,
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
-      body: JSON.stringify({
-        model: MODEL,
-        messages,
-        temperature: 0.2,
-        stream: false,
-        ...(JSON_MODE ? { response_format: { type: 'json_object' } } : {}),
-      }),
-    });
-    if (!res.ok) throw new Error(`LLM HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    let res = await send();
+    // Some servers (LM Studio) reject JSON mode. The prompt already asks for JSON, so retry without it.
+    if (res.status === 400 && jsonMode) {
+      const text = await res.text();
+      if (/response_format|json/i.test(text)) { jsonMode = false; res = await send(); }
+      else throw Object.assign(new Error(`HTTP 400: ${text.slice(0, 160)}`), { kind: 'http' });
+    }
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`), { kind: 'http' });
     const j = await res.json();
     return j.choices?.[0]?.message?.content || '';
   } finally {
     clearTimeout(t);
   }
+}
+
+/** Why Planner couldn't answer, in words the chat can show. */
+export function aiErrorText(e) {
+  if (aiMisconfigured) return 'LLM_BASE_URL is not set on the server';
+  if (e?.name === 'AbortError') return 'the model took too long';
+  if (e?.kind === 'http') return `the model server said ${e.message}`;
+  return 'cannot reach the model server';
 }
 
 function extractJSON(text) {
