@@ -29,7 +29,7 @@ It's hosted on Vercel. Planner runs on the owner's local Ollama model, which Ver
 - Auth uses JWTs stored in localStorage. Invite links are `/join/<signed token>`. Signing up or in from one makes both people friends and opens a DM. It also bypasses `REGISTRATION_CODE`.
 
 ## Hosting
-- Vercel (main): the Root Directory is the repo root. `vercel.json` builds `web/`, routes `/api/*` to `api/index.js` (Frankfurt, 300s max) and runs a daily cron.
+- Vercel (main): the Root Directory is the repo root. `vercel.json` builds `web/`, routes `/api/*` to `api/index.js` (`iad1`, next to the Neon database in us-east-1; 300s max) and runs a daily cron.
   - Needs `DATABASE_URL` (Neon), `PUSHER_*`, `QSTASH_TOKEN`, `LLM_*` and `REGISTRATION_CODE`. `/api/health` shows what's connected.
 - All-in-one: run `npm start` on a machine behind HTTPS (Tailscale Funnel). It needs no other services.
 
