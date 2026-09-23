@@ -7,7 +7,7 @@ import { enablePush, disablePush, pushState, isIOS, isStandalone } from '../lib/
 
 const KIND_ICON = {
   event_invite: ['cal', 'var(--violet)'], event_update: ['cal', 'var(--blue)'], event_cancel: ['x', 'var(--danger)'], rsvp: ['check', 'var(--ok)'],
-  reminder: ['clock', 'var(--gold)'], invite_call: ['video', 'var(--ok)'], invite_chill: ['coffee', 'var(--pink)'], invite_response: ['check', 'var(--ok)'],
+  reminder: ['clock', 'var(--gold)'], invite_call: ['video', 'var(--ok)'], missed_call: ['video', 'var(--danger)'], invite_chill: ['coffee', 'var(--pink)'], invite_response: ['check', 'var(--ok)'],
   friend_request: ['userPlus', 'var(--violet)'], friend_accept: ['friends', 'var(--ok)'], message: ['chat', 'var(--blue)'], test: ['bell', 'var(--gold)'],
 };
 

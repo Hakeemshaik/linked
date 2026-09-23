@@ -21,9 +21,23 @@ export default function Call() {
   const [error, setError] = useState('');
   const [started] = useState(Date.now());
   const [, tick] = useState(0);
+  const [ringing, setRinging] = useState([]); // people this caller is ringing: [{ invite_id, user, status }]
+  const [ended, setEnded] = useState('');
   const pcs = useRef(new Map());
   const localRef = useRef(null);
   const selfRef = useRef(null); // this browser's peer id in the call
+  const everJoined = useRef(false);
+  const endTimer = useRef(null);
+
+  const back = () => navigate(window.history.length > 1 ? -1 : '/');
+  // Show why the call is over for a moment, then go back.
+  const end = (why) => {
+    if (endTimer.current) return;
+    setEnded(why);
+    localRef.current?.getTracks().forEach((t) => t.stop());
+    endTimer.current = setTimeout(back, 1800);
+  };
+  useEffect(() => () => clearTimeout(endTimer.current), []);
 
   const upsert = (peerId, patch) => setPeers((list) => {
     const i = list.findIndex((p) => p.peerId === peerId);
@@ -104,8 +118,9 @@ export default function Call() {
     const onJoined = (p) => mine(p) && makePeer(p.peerId, p.user, false);
     const onLeft = (p) => mine(p) && drop(p.peerId);
     const onMedia = (p) => mine(p) && upsert(p.peerId, { mic: p.mic, cam: p.cam });
+    const onAnswer = (p) => p.room_id === room && setRinging((l) => l.map((r) => (r.invite_id === p.invite_id ? { ...r, status: p.accept ? 'accepted' : 'declined' } : r)));
 
-    let ping;
+    let ping, giveUp;
     const leave = () => { if (selfRef.current) api('leave', {}, { keepalive: true }).catch(() => {}); selfRef.current = null; };
     (async () => {
       let stream;
@@ -122,21 +137,27 @@ export default function Call() {
       rt.on('call:peer-joined', onJoined);
       rt.on('call:peer-left', onLeft);
       rt.on('call:media', onMedia);
+      rt.on('invite:response', onAnswer);
       try {
         const res = await post(`/calls/${room}/join`);
         if (cancelled) { selfRef.current = res.self; leave(); return; }
         selfRef.current = res.self;
+        setRinging(res.ringing || []);
         res.peers.forEach((p) => makePeer(p.peerId, p.user, true));
         ping = setInterval(() => api('ping').catch(() => {}), 15000);
-      } catch (e) { setError(e.message); }
+        // Nobody picked up in time: stop ringing them (leaving marks it missed) and close the call.
+        giveUp = setTimeout(() => { if (!everJoined.current) end(res.ringing?.length ? 'No answer' : 'Call ended'); }, res.ring_ms || 45000);
+      } catch (e) { end(e.message); }
     })();
     window.addEventListener('pagehide', leave);
 
     return () => {
       cancelled = true;
       clearInterval(ping);
+      clearTimeout(giveUp);
       window.removeEventListener('pagehide', leave);
       leave();
+      rt.off('invite:response', onAnswer);
       rt.off('call:signal', onSignal);
       rt.off('call:peer-joined', onJoined);
       rt.off('call:peer-left', onLeft);
@@ -148,6 +169,18 @@ export default function Call() {
       setPeers([]);
     };
   }, [rt, config, room]);
+
+  // Everyone else hung up: the call is over.
+  useEffect(() => {
+    if (peers.length) everJoined.current = true;
+    else if (everJoined.current) end('Call ended');
+  }, [peers.length]); // eslint-disable-line
+
+  // Everyone we rang said no.
+  useEffect(() => {
+    if (everJoined.current || !ringing.length || !ringing.every((r) => r.status === 'declined')) return;
+    end(ringing.length === 1 ? `${ringing[0].user?.display_name?.split(' ')[0] || 'They'} declined` : 'Nobody can make it right now');
+  }, [ringing]); // eslint-disable-line
 
   const toggleMic = () => {
     const v = !mic; setMic(v);
@@ -172,11 +205,17 @@ export default function Call() {
       setFacing(next);
     } catch { /* single camera */ }
   };
-  const hangup = () => navigate(window.history.length > 1 ? -1 : '/');
+  const hangup = () => { clearTimeout(endTimer.current); back(); };
 
   const secs = Math.floor((Date.now() - started) / 1000);
   const dur = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
   const connected = peers.some((p) => p.state === 'connected');
+  const first = (u) => u?.display_name?.split(' ')[0] || 'Friend';
+  const joining = ringing.filter((r) => r.status === 'accepted');
+  const waitingFor = ringing.filter((r) => r.status === 'pending');
+  const waiting = ended || error
+    || (joining.length ? `${joining.map((r) => first(r.user)).join(', ')} ${joining.length > 1 ? 'are' : 'is'} joining…`
+      : waitingFor.length ? `Ringing ${waitingFor.map((r) => first(r.user)).join(', ')}…` : 'Connecting…');
 
   return (
     <div className="call">
@@ -184,7 +223,7 @@ export default function Call() {
         {peers.length === 0 && (
           <div className="call-waiting">
             <Avatar user={me} size={96} />
-            <p>{error || 'Ringing… waiting for others to join'}</p>
+            <p>{waiting}</p>
           </div>
         )}
         {peers.map((p) => (
@@ -196,7 +235,7 @@ export default function Call() {
         ))}
       </div>
       {local && <div className="self-view"><Video stream={local} muted mirror={facing === 'user'} />{!cam && <div className="self-off">Camera off</div>}</div>}
-      <div className="call-top"><span>{connected ? dur : 'Connecting'}</span></div>
+      <div className="call-top"><span>{ended ? 'Call ended' : connected ? dur : peers.length ? 'Connecting' : ringing.length ? 'Calling' : 'Connecting'}</span></div>
       <div className="call-controls">
         <button className={`cbtn ${mic ? '' : 'off'}`} onClick={toggleMic}><Icon name={mic ? 'mic' : 'micOff'} /><small>{mic ? 'Mute' : 'Unmute'}</small></button>
         <button className={`cbtn ${cam ? '' : 'off'}`} onClick={toggleCam}><Icon name={cam ? 'video' : 'camOff'} /><small>Camera</small></button>

@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import {
   q, one, run, id, now, publicUser, getUser, getUsers, findUser, friendIds, areFriends, isMember, memberIds, parseRow, dbKind,
 } from './db.js';
-import { signToken, requireAuth, signInvite, verifyInvite, verifyToken, internalSecret } from './auth.js';
+import { signToken, requireAuth, inviteCodeFor, verifyInvite, verifyToken, internalSecret } from './auth.js';
 import {
   presenceOf, broadcastPresence, emitToUser, emitToUsers, heartbeat, realtimeKind, realtimeClientConfig,
   authorizeChannel, addStream, readRelay,
@@ -12,7 +12,7 @@ import { notify } from './notify.js';
 import { vapid, saveSubscription, removeSubscription, sendPush } from './push.js';
 import { runAI, normalizePlan, aiInfo, aiErrorText, aiHeaders, aiMisconfigured } from './ai.js';
 import { formatWhen, zonedToDate, TZ } from './time.js';
-import { remindAt, scheduleReminder, runReminders, queueUpcoming, maybeRunReminders, remindersKind } from './scheduler.js';
+import { remindAt, scheduleReminder, runReminders, queueUpcoming, maybeRunReminders, remindersKind, baseUrl } from './scheduler.js';
 import { background } from './background.js';
 
 export const api = express.Router();
@@ -118,7 +118,11 @@ api.get('/realtime/stream', wrap(async (req, res) => {
 
 api.use(wrap(requireAuth));
 
-api.get('/invite-link', wrap(async (req, res) => res.json({ token: await signInvite(req.user.id) })));
+// Your invite link. Always on the production address, so a link shared from a preview deployment still works.
+api.get('/invite-link', wrap(async (req, res) => {
+  const token = await inviteCodeFor(req.user.id);
+  res.json({ token, url: `${baseUrl(req)}/join/${token}` });
+}));
 
 async function findDM(a, b) {
   return (await one(
@@ -680,6 +684,9 @@ api.post('/messages/:id/confirm-plan', wrap(async (req, res) => {
 }));
 
 // ---------- quick invites (video call / chill) ----------
+// A call rings for 45s. The caller's screen gives up at the same time and marks it missed.
+const RING_MS = 45000;
+
 api.post('/invites', wrap(async (req, res) => {
   const { to_ids = [], kind = 'call', message = '' } = req.body || {};
   if (!['call', 'chill'].includes(kind)) return bad(res, 'Bad kind');
@@ -724,17 +731,22 @@ api.get('/calls', wrap(async (req, res) => {
     const key = outgoing ? r.room_id : r.id;
     const other = publicUser(users.get(outgoing ? r.to_id : r.from_id));
     if (!other) continue;
-    if (!byRoom.has(key)) byRoom.set(key, { id: key, room_id: r.room_id, outgoing, people: [], status: r.status, created_at: r.created_at });
+    if (!byRoom.has(key)) byRoom.set(key, { id: key, room_id: r.room_id, outgoing, people: [], statuses: [], created_at: r.created_at });
     const c = byRoom.get(key);
     c.people.push(other);
-    if (r.status === 'accepted') c.status = 'accepted';
+    c.statuses.push(r.status);
   }
-  const calls = [...byRoom.values()].map((c) => ({ ...c, missed: !c.outgoing && c.status !== 'accepted' }));
+  // accepted: someone picked up · declined: everyone said no · missed: nobody answered
+  const calls = [...byRoom.values()].map(({ statuses, ...c }) => {
+    const status = statuses.includes('accepted') ? 'accepted' : statuses.every((x) => x === 'declined') ? 'declined' : 'missed';
+    return { ...c, status, missed: !c.outgoing && status === 'missed' };
+  });
   res.json({ calls: calls.slice(0, 60) });
 }));
 
 api.get('/invites', wrap(async (req, res) => {
-  const since = new Date(Date.now() - 12 * 3600000).toISOString();
+  // Only invites still ringing, so reopening the app never rings for a call that's over.
+  const since = new Date(Date.now() - RING_MS).toISOString();
   const rows = await q(`SELECT * FROM invites WHERE to_id = ? AND status = 'pending' AND created_at > ? ORDER BY created_at DESC`, [req.user.id, since]);
   const users = await usersById(rows.map((r) => r.from_id));
   res.json({ invites: rows.map((r) => ({ ...r, from: publicUser(users.get(r.from_id)) })) });
@@ -750,6 +762,12 @@ api.post('/invites/:id/respond', wrap(async (req, res) => {
   const r = await one('SELECT * FROM invites WHERE id = ? AND to_id = ?', [req.params.id, req.user.id]);
   if (!r) return bad(res, 'Not found', 404);
   const accept = !!req.body?.accept;
+  if (r.status !== 'pending') {
+    // Already answered or missed: rejoining is fine while the call is still going.
+    const live = r.kind === 'call' && (await one('SELECT 1 AS x FROM call_peers WHERE room = ?', [r.room_id]));
+    if (accept && r.kind === 'call' && r.status !== 'accepted' && !live) return bad(res, 'This call has ended', 410);
+    return res.json({ ok: true, room_id: r.room_id });
+  }
   await run('UPDATE invites SET status = ? WHERE id = ?', [accept ? 'accepted' : 'declined', r.id]);
   const what = r.kind === 'call' ? 'video call' : 'chill';
   await Promise.all([
@@ -759,7 +777,7 @@ api.post('/invites/:id/respond', wrap(async (req, res) => {
       body: accept ? (r.kind === 'call' ? 'Joining the call now' : "They're down. Sort out the details in chat.") : `Declined your ${what} invite`,
       url: r.kind === 'call' && accept ? `/call/${r.room_id}` : '/',
     }),
-    emitToUser(r.from_id, 'invite:response', { invite_id: r.id, accept, by: publicUser(req.user) }),
+    emitToUser(r.from_id, 'invite:response', { invite_id: r.id, room_id: r.room_id, accept, by: publicUser(req.user) }),
   ]);
   res.json({ ok: true, room_id: r.room_id });
 }));
@@ -777,18 +795,39 @@ async function canJoinCall(uid, room) {
 const ownPeer = (req) => one('SELECT * FROM call_peers WHERE peer_id = ? AND room = ? AND user_id = ?', [req.body?.from || '', req.params.room, req.user.id]);
 const otherPeers = (room, peerId) => q('SELECT * FROM call_peers WHERE room = ? AND peer_id != ?', [room, peerId]);
 
+/** Stop ringing people who haven't answered this user's call: mark it missed and tell their phones. */
+async function cancelRinging(user, room) {
+  const rows = await q(`UPDATE invites SET status = 'missed' WHERE room_id = ? AND from_id = ? AND status = 'pending' RETURNING id, to_id`, [room, user.id]);
+  await Promise.all(rows.map((r) => Promise.all([
+    emitToUser(r.to_id, 'invite:cancel', { room_id: room, invite_id: r.id }),
+    // Same tag as the ringing notification, so it replaces it on the lock screen.
+    notify([r.to_id], { kind: 'missed_call', title: `Missed video call from ${user.display_name}`, body: 'Tap to call back', url: '/calls', tag: `invite-${r.id}` }),
+  ])));
+}
+
 api.post('/calls/:room/join', wrap(async (req, res) => {
   const { room } = req.params;
   if (!(await canJoinCall(req.user.id, room))) return bad(res, 'Not allowed in this call', 403);
   await run('DELETE FROM call_peers WHERE room = ? AND seen_at < ?', [room, new Date(Date.now() - PEER_STALE_MS).toISOString()]);
   const existing = await q('SELECT * FROM call_peers WHERE room = ?', [room]);
   if (existing.length >= 6) return bad(res, 'Call is full (max 6)', 409);
+  const invites = await q('SELECT * FROM invites WHERE room_id = ?', [room]);
+  // Nobody here and nobody left to ring or rejoin: the call is over.
+  if (!existing.length && invites.length && !invites.some((i) => i.status === 'pending' || i.status === 'accepted')) return bad(res, 'This call has ended', 410);
   const peerId = id();
   await run('INSERT INTO call_peers (peer_id, room, user_id, seen_at) VALUES (?, ?, ?, ?)', [peerId, room, req.user.id, now()]);
   const users = await usersById(existing.map((p) => p.user_id));
   const user = publicUser(req.user);
   await emitToUsers(existing.map((p) => p.user_id), 'call:peer-joined', { room, peerId, user });
-  res.json({ self: peerId, peers: existing.map((p) => ({ peerId: p.peer_id, user: publicUser(users.get(p.user_id)) })) });
+  // The caller also gets who they're ringing, so their screen can show "declined" or "no answer".
+  const mine = invites.filter((i) => i.from_id === req.user.id);
+  const callees = await usersById(mine.map((i) => i.to_id));
+  res.json({
+    self: peerId,
+    peers: existing.map((p) => ({ peerId: p.peer_id, user: publicUser(users.get(p.user_id)) })),
+    ringing: mine.map((i) => ({ invite_id: i.id, user: publicUser(callees.get(i.to_id)), status: i.status, created_at: i.created_at })),
+    ring_ms: RING_MS,
+  });
 }));
 
 api.post('/calls/:room/signal', wrap(async (req, res) => {
@@ -814,9 +853,11 @@ api.post('/calls/:room/ping', wrap(async (req, res) => {
 
 api.post('/calls/:room/leave', wrap(async (req, res) => {
   const me = await ownPeer(req);
-  if (!me) return res.json({ ok: true });
-  await run('DELETE FROM call_peers WHERE peer_id = ?', [me.peer_id]);
-  await emitToUsers((await otherPeers(req.params.room, me.peer_id)).map((p) => p.user_id), 'call:peer-left', { room: req.params.room, peerId: me.peer_id });
+  if (me) await run('DELETE FROM call_peers WHERE peer_id = ?', [me.peer_id]);
+  const others = await q('SELECT * FROM call_peers WHERE room = ?', [req.params.room]);
+  // Hanging up before anyone answered (or as the last one in) stops the ringing on their phones.
+  if (!others.length) await cancelRinging(req.user, req.params.room);
+  if (me) await emitToUsers(others.map((p) => p.user_id), 'call:peer-left', { room: req.params.room, peerId: me.peer_id });
   res.json({ ok: true });
 }));
 

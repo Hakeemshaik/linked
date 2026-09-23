@@ -88,7 +88,7 @@ export function AppProvider({ children, navigate }) {
     // On every (re)connect: pick up any invite that rang while we were offline.
     s.on('connect', () => {
       get('/invites').then((r) => {
-        const fresh = r.invites.find((i) => Date.now() - Date.parse(i.created_at) < 90000);
+        const fresh = r.invites.find((i) => Date.now() - Date.parse(i.created_at) < 45000);
         if (fresh) setIncoming((cur) => cur || fresh);
       }).catch(() => {});
     });
@@ -107,6 +107,8 @@ export function AppProvider({ children, navigate }) {
       toast({ title: n.title, body: n.body, url: n.url });
     });
     s.on('invite', (inv) => setIncoming(inv));
+    // The caller hung up or gave up: stop ringing.
+    s.on('invite:cancel', (p) => setIncoming((cur) => (cur?.id === p.invite_id ? null : cur)));
     return () => { s.disconnect(); rtRef.current = null; setRt(null); };
   }, [token, meId, rtKey]); // eslint-disable-line
 

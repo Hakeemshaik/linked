@@ -26,7 +26,7 @@ It's hosted on Vercel. Planner runs on the owner's local Ollama model, which Ver
   - Planner is a pinned chat (`conversations.is_ai = 1`). `openPlanner(draft)` in `lib/store.jsx` opens it with text ready to send.
   - `lib/realtime.js` connects to Pusher or the SSE stream and exposes `on` and `off`. Everything the client sends goes through the REST API.
   - `public/sw.js` is the service worker: it shows the push content, handles action buttons, and caches the offline shell.
-- Auth uses JWTs stored in localStorage. Invite links are `/join/<signed token>`. Signing up or in from one makes both people friends and opens a DM. It also bypasses `REGISTRATION_CODE`.
+- Auth uses JWTs stored in localStorage. Invite links are `/join/<code>`: one permanent code per person (`users.invite_code`), always on the production address. Old signed links still work. Signing up or in from one makes both people friends and opens a DM. It also bypasses `REGISTRATION_CODE`.
 
 ## Hosting
 - Vercel (main): the Root Directory is the repo root. `vercel.json` builds `web/`, routes `/api/*` to `api/index.js` (`iad1`, next to the Neon database in us-east-1; 300s max) and runs a daily cron.
@@ -48,5 +48,6 @@ It's hosted on Vercel. Planner runs on the owner's local Ollama model, which Ver
 - Motion lives in the "Motion" block at the bottom of `styles.css`. Use `--spring` and `--ease-out`. Every animation must also work under `prefers-reduced-motion`.
 - Realtime: the server calls `await emitToUsers(ids, event, payload)`, and clients subscribe with `useSocket(event, fn)`. Client-to-server messages are REST calls, never socket emits.
 - Serverless: don't keep state in module variables across requests. Await work before responding, or wrap it in `background()`.
+- Calls ring for 45s (`RING_MS` in `api.js`). The caller's screen ends on decline, on no answer, or when everyone else hangs up. Leaving before anyone answers marks the invites missed and stops the ring.
 - Any new user-facing event should go through `notify()` so it gets an in-app toast, an Alerts entry and a push.
 - Before you say something works, run the e2e test and take screenshots at 390x844 in light and dark.

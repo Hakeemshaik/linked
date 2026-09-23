@@ -20,7 +20,7 @@ export default function Calls() {
   const load = () => get('/calls').then((r) => setCalls(r.calls)).catch(() => setCalls([]));
   useEffect(() => { load(); }, []);
   useSocket('invite', load);
-  useSocket('notification', (n) => n.kind === 'invite_response' && load());
+  useSocket('notification', (n) => (n.kind === 'invite_response' || n.kind === 'missed_call') && load());
 
   const call = async (people) => {
     try { const r = await post('/invites', { to_ids: people.map((p) => p.id), kind: 'call' }); navigate(`/call/${r.room_id}`); }
@@ -64,7 +64,7 @@ export default function Calls() {
                 <b className={c.missed ? 'danger' : ''}>{c.people.map((p) => p.display_name.split(' ')[0]).join(', ')}</b>
                 <small className="call-line">
                   <Icon name={c.outgoing ? 'arrowOut' : 'arrowIn'} size={15} className={c.missed ? 'danger' : 'ok'} />
-                  {c.outgoing ? 'Outgoing' : c.missed ? 'Missed' : 'Incoming'} · {when(c.created_at)}
+                  {c.status === 'declined' ? 'Declined' : c.outgoing ? (c.status === 'accepted' ? 'Outgoing' : 'No answer') : c.missed ? 'Missed' : 'Incoming'} · {when(c.created_at)}
                 </small>
               </span>
               <button className="icon-plain accent" onClick={() => call(c.people)} aria-label="Call back"><Icon name="video" size={24} /></button>
