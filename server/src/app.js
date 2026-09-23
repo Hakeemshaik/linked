@@ -28,5 +28,5 @@ app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use('/api', (err, req, res, _next) => {
   console.error('[api]', err);
-  res.status(500).json({ error: 'Something went wrong' });
+  res.status(500).json({ error: err.expose ? err.message : 'Something went wrong. Open /api/health to check the setup.' });
 });

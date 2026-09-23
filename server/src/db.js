@@ -148,6 +148,8 @@ let driverP = null;
 function driver() {
   if (driverP) return driverP;
   driverP = (async () => {
+    // Vercel has no writable disk for the embedded database, so a missing DATABASE_URL is a setup error.
+    if (!URL && process.env.VERCEL) throw setupError('No database yet. In Vercel, open Storage, add Neon, connect it to this project, then redeploy.');
     let d;
     if (URL) {
       const { default: pg } = await import('pg');
@@ -185,6 +187,9 @@ async function migrate(d) {
   await d.exec(`BEGIN; SELECT pg_advisory_xact_lock(727274); ${SCHEMA}
     INSERT INTO kv (key, value) VALUES ('schema', '${SCHEMA_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value; COMMIT;`);
 }
+
+/** An error whose message is safe and useful to show in the app (setup problems). */
+export const setupError = (message) => Object.assign(new Error(message), { expose: true });
 
 // Write SQL with ? placeholders; they become $1, $2, ... for Postgres.
 const numbered = (sql) => { let i = 0; return sql.replace(/\?/g, () => `$${++i}`); };
