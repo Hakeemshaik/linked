@@ -6,7 +6,8 @@ import { sendPush } from './push.js';
  * Create a notification for each user: store it, deliver in-app live, and send a Web Push
  * with the full content when the app isn't open on screen.
  *
- * opts: { kind, title, body, url, data, actions: [{action,title,url}], tag, requireInteraction, alwaysPush, store }
+ * opts: { kind, title, body, url, data, actions: [{action,title,url}], tag, requireInteraction, alwaysPush, store, ttl }
+ * ttl: seconds a push may wait for an offline phone (calls use 45, so nobody rings late for an old call).
  */
 export async function notify(userIds, opts) {
   const ids = [...new Set(userIds)].filter(Boolean);
@@ -42,6 +43,8 @@ export async function notify(userIds, opts) {
         tag: opts.tag || n.id,
         actions: (opts.actions || []).slice(0, 2),
         requireInteraction: !!opts.requireInteraction,
+        from: opts.data?.from || null,
+        ttl: opts.ttl,
         timestamp: Date.now(),
       }).catch((e) => console.warn('[push] error', e.message)));
     }

@@ -128,6 +128,8 @@ export function ChatView({ convId: id }) {
     get(`/conversations/${id}`).then((r) => setConv(r.conversation)).catch(() => navigate('/', { replace: true }));
     get(`/conversations/${id}/messages`).then((r) => { initialIds.current = new Set(r.messages.map((m) => m.id)); setMsgs(r.messages); });
     markRead();
+    // Reading the chat clears its notifications from the lock screen.
+    navigator.serviceWorker?.ready.then((r) => r.getNotifications({ tag: `chat-${id}` })).then((ns) => ns?.forEach((n) => n.close())).catch(() => {});
     if (qs.get('draft')) { setText(qs.get('draft')); setQs({}, { replace: true }); setTimeout(() => inputRef.current?.focus(), 300); }
   }, [id]); // eslint-disable-line
 

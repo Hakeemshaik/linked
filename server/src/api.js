@@ -6,7 +6,7 @@ import {
 import { signToken, requireAuth, inviteCodeFor, verifyInvite, verifyToken, internalSecret } from './auth.js';
 import {
   presenceOf, broadcastPresence, emitToUser, emitToUsers, heartbeat, realtimeKind, realtimeClientConfig,
-  authorizeChannel, addStream, readRelay,
+  authorizeChannel, addStream, readRelay, visibleUserIds,
 } from './realtime.js';
 import { notify } from './notify.js';
 import { vapid, saveSubscription, removeSubscription, sendPush } from './push.js';
@@ -608,7 +608,7 @@ async function postMessage(convId, sender, kind, body, data = null) {
     emitToUsers(members, 'message', msg),
     notify(members.filter((u) => u !== sender?.id), {
       kind: 'message', title, body: text.slice(0, 240), url: `/chat/${convId}`, tag: `chat-${convId}`,
-      data: { conversation_id: convId }, store: kind === 'plan',
+      data: { conversation_id: convId, from: sender ? publicUser(sender) : null }, store: kind === 'plan',
     }),
   ]);
   return msg;
@@ -686,6 +686,26 @@ api.post('/messages/:id/confirm-plan', wrap(async (req, res) => {
 // ---------- quick invites (video call / chill) ----------
 // A call rings for 45s. The caller's screen gives up at the same time and marks it missed.
 const RING_MS = 45000;
+const callActions = (iid) => [
+  { action: 'accept', title: 'Join', url: `/invite/${iid}?act=accept` },
+  { action: 'decline', title: 'Decline', url: `/invite/${iid}?act=decline` },
+];
+
+// A web push can't ring like a phone call, so while a call rings we re-send it every 6s:
+// each one alerts again (sound + vibration) on a locked phone. Stops the moment it's answered or missed.
+async function keepRinging(invites, from) {
+  for (let t = 6000; t < RING_MS - 3000; t += 6000) {
+    await new Promise((r) => setTimeout(r, 6000));
+    const pending = await q(`SELECT id, to_id FROM invites WHERE id = ANY(?) AND status = 'pending'`, [invites.map((i) => i.id)]);
+    if (!pending.length) return;
+    const onScreen = await visibleUserIds(pending.map((p) => p.to_id)); // the in-app ring handles those
+    await Promise.all(pending.filter((p) => !onScreen.has(p.to_id)).map((p) => sendPush(p.to_id, {
+      id: p.id, kind: 'invite_call', title: `${from.display_name} is calling`, body: 'Video call · tap to answer',
+      url: `/invite/${p.id}`, tag: `invite-${p.id}`, requireInteraction: true, actions: callActions(p.id),
+      from: publicUser(from), ttl: 30, timestamp: Date.now(),
+    }).catch(() => {})));
+  }
+}
 
 api.post('/invites', wrap(async (req, res) => {
   const { to_ids = [], kind = 'call', message = '' } = req.body || {};
@@ -704,20 +724,22 @@ api.post('/invites', wrap(async (req, res) => {
       emitToUser(uid, 'invite', inv),
       notify([uid], {
         kind: `invite_${kind}`,
-        title: kind === 'call' ? `${req.user.display_name} wants to video call` : `${req.user.display_name} wants to chill`,
-        body: message || (kind === 'call' ? 'Tap to join the call' : 'You down? Tap to answer'),
+        title: kind === 'call' ? `${req.user.display_name} is calling` : `${req.user.display_name} wants to chill`,
+        body: message || (kind === 'call' ? 'Video call · tap to answer' : 'You down? Tap to answer'),
         url: `/invite/${iid}`,
         tag: `invite-${iid}`,
         requireInteraction: kind === 'call',
-        data: { invite_id: iid, room_id: room },
-        actions: [
-          { action: 'accept', title: kind === 'call' ? 'Join' : "I'm down", url: `/invite/${iid}?act=accept` },
+        ttl: kind === 'call' ? 45 : undefined,
+        data: { invite_id: iid, room_id: room, from: publicUser(req.user) },
+        actions: kind === 'call' ? callActions(iid) : [
+          { action: 'accept', title: "I'm down", url: `/invite/${iid}?act=accept` },
           { action: 'decline', title: 'Not now', url: `/invite/${iid}?act=decline` },
         ],
       }),
     ]);
     return inv;
   }));
+  if (kind === 'call') background(keepRinging(created, req.user));
   res.json({ invites: created, room_id: room });
 }));
 

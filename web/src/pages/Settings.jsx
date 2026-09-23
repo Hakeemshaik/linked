@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { patch } from '../lib/api.js';
+import { APP_VERSION } from '../lib/update.js';
 import { useApp, STATUS } from '../lib/store.jsx';
 import { Avatar, Header, Icon, Sheet } from '../components/ui.jsx';
 import { disablePush } from '../lib/push.js';
@@ -82,6 +83,7 @@ export default function Settings() {
           <button className="btn primary block" onClick={saveName} disabled={!name.trim()}>Save</button>
         </div>
       </Sheet>
+      <p className="muted small center">Linkup {APP_VERSION}</p>
     </>
   );
 }

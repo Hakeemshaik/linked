@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, useNavigationType } from 'react-router-dom';
 import { AppProvider, useApp } from './lib/store.jsx';
 import { TabBar, Toasts, Orb } from './components/ui.jsx';
+import UpdatePrompt from './components/UpdatePrompt.jsx';
 import { post } from './lib/api.js';
 import IncomingInvite from './components/IncomingInvite.jsx';
 import Login from './pages/Login.jsx';
@@ -68,11 +69,17 @@ function Shell() {
   }
   useEffect(() => { prev.current = loc.pathname; }, [loc.pathname]);
 
-  if (!token) return <><Splash /><Login /></>;
-  const fullScreen = loc.pathname.startsWith('/call/') || /^\/chat\/.+/.test(loc.pathname);
+  // The active call lives outside the routes, so it keeps going (as the island pill) on other screens.
+  const onCall = (loc.pathname.match(/^\/call\/([^/?#]+)/) || [])[1];
+  const [activeCall, setActiveCall] = useState(null);
+  useEffect(() => { if (onCall) setActiveCall(onCall); }, [onCall]);
+
+  if (!token) return <><Splash /><Login /><Toasts /><UpdatePrompt /></>;
+  const fullScreen = !!onCall || /^\/chat\/.+/.test(loc.pathname);
   const showTabs = TAB_ROOTS.includes(loc.pathname);
+  const pill = activeCall && onCall !== activeCall;
   return (
-    <div className={`app ${fullScreen ? 'fullscreen' : ''} ${showTabs ? 'with-tabs' : ''}`}>
+    <div className={`app ${fullScreen ? 'fullscreen' : ''} ${showTabs ? 'with-tabs' : ''} ${pill ? 'island-on' : ''}`}>
       <Splash />
       <main className={`page ${anim}`} key={loc.pathname}>
         <Routes>
@@ -89,15 +96,17 @@ function Shell() {
           <Route path="/event/:id" element={<EventPage />} />
           <Route path="/event/:id/edit" element={<EventForm />} />
           <Route path="/alerts" element={<Alerts />} />
-          <Route path="/call/:room" element={<Call />} />
+          <Route path="/call/:room" element={null} />
           <Route path="/invite/:id" element={<InvitePage />} />
           <Route path="/join/:token" element={<div className="spinner" />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       {showTabs && <TabBar />}
+      {activeCall && <Call key={activeCall} room={activeCall} minimized={onCall !== activeCall} onClose={() => setActiveCall(null)} />}
       <Toasts />
       <IncomingInvite />
+      <UpdatePrompt />
     </div>
   );
 }

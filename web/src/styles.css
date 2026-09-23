@@ -53,6 +53,11 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.35 var(--font); -webkit-font-smoothing: antialiased; overscroll-behavior: none; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; touch-action: manipulation; }
+body { overflow-x: hidden; }
+/* Feels like an app, not a web page: controls don't get selected or show the long-press menu. */
+button, a, .tab, .row-item, .chip, .filter, .fav, .island, img, svg { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.text, input, textarea { -webkit-user-select: text; user-select: text; }
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; }
 a { color: var(--accent-ink); }
 input, select, textarea {
@@ -87,18 +92,22 @@ p { margin: 6px 0; }
 .violet { color: var(--accent-ink); }
 
 /* ---------- layout ---------- */
-.app { max-width: 600px; margin: 0 auto; min-height: 100dvh; }
+.app { max-width: 600px; margin: 0 auto; min-height: 100dvh; overflow-x: clip; --top: calc(var(--safe-t) + var(--island-space, 0px)); }
+.app.island-on { --island-space: 46px; }
 .page { padding: 0 0 calc(40px + var(--safe-b)); }
 .app.with-tabs .page { padding-bottom: calc(96px + var(--safe-b)); }
 .app.fullscreen .page { padding: 0; }
 section { margin-bottom: 8px; }
 
-.header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 8px; padding: calc(var(--safe-t) + 8px) 16px 8px;
+.header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 8px; padding: calc(var(--top, var(--safe-t)) + 8px) 16px 8px;
   background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6); }
-.header.large { padding-top: calc(var(--safe-t) + 10px); min-height: 60px; }
-.header.nav h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; text-align: center; }
-.header.nav .grow { text-align: center; }
-.header.nav .header-right { min-width: 44px; justify-content: flex-end; }
+.header.large { padding-top: calc(var(--top, var(--safe-t)) + 10px); min-height: 60px; }
+/* Back | title | actions: equal side columns keep the title in the exact centre. */
+.header.nav { display: grid; grid-template-columns: 1fr auto 1fr; }
+.header.nav h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header.nav .grow { text-align: center; max-width: 58vw; }
+.header.nav .back-btn { justify-self: start; }
+.header.nav .header-right { min-width: 44px; justify-content: flex-end; justify-self: end; }
 .header-right { display: flex; gap: 4px; align-items: center; }
 .subtitle { color: var(--muted); font-size: 13px; }
 .back-btn { width: 44px; height: 44px; margin-left: -10px; display: grid; place-items: center; color: var(--accent-ink); flex: none; }
@@ -198,7 +207,7 @@ section { margin-bottom: 8px; }
 
 /* ---------- chat ---------- */
 .chat { display: flex; flex-direction: column; height: 100dvh; background: var(--wall); }
-.chat-header { display: flex; align-items: center; gap: 4px; padding: calc(var(--safe-t) + 6px) 8px 6px 16px; background: var(--surface); border-bottom: 0.5px solid var(--line); z-index: 2; }
+.chat-header { display: flex; align-items: center; gap: 4px; padding: calc(var(--top, var(--safe-t)) + 6px) 8px 6px 16px; background: var(--surface); border-bottom: 0.5px solid var(--line); z-index: 2; }
 .chat-who { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 2px 0; }
 .chat-who b { font-size: 16px; font-weight: 700; }
 .chat-who small { font-size: 13px; color: var(--muted); }
@@ -300,13 +309,27 @@ section { margin-bottom: 8px; }
 @keyframes up { from { transform: translateY(40px); opacity: 0; } }
 @keyframes fade { from { opacity: 0; } }
 
-/* toasts */
-.toasts { position: fixed; top: calc(var(--safe-t) + 8px); left: 0; right: 0; z-index: 90; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 10px; pointer-events: none; }
-.toast { pointer-events: auto; width: 100%; max-width: 560px; text-align: left; border-radius: 16px; padding: 12px 14px; background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); box-shadow: 0 8px 30px rgba(0,0,0,.18); color: var(--ink); animation: drop .4s cubic-bezier(.3, 1.4, .5, 1); }
-.toast strong { display: block; font-weight: 700; }
-.toast span { font-size: 14px; color: var(--muted); }
-@keyframes drop { from { transform: translateY(-20px); opacity: 0; } }
+/* ---------- island: alerts, updates and the ongoing call drop out of the top centre, like the iPhone's island ---------- */
+.island-wrap { position: fixed; top: calc(var(--safe-t) + 8px); left: 0; right: 0; z-index: 96; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 12px; pointer-events: none; }
+.island { pointer-events: auto; display: flex; align-items: center; gap: 12px; width: 100%; max-width: 420px; min-height: 56px; padding: 10px 12px 10px 10px; border-radius: 28px;
+  background: #0B0A10; color: #fff; text-align: left; box-shadow: 0 12px 34px -8px rgba(0, 0, 0, .45); transform-origin: top center; }
+.island .grow { display: flex; flex-direction: column; min-width: 0; }
+.island strong, .island b { font-size: 15px; font-weight: 700; color: #fff; }
+.island small, .island .grow > span { font-size: 13.5px; color: rgba(255, 255, 255, .66); }
+.island-ic { width: 36px; height: 36px; border-radius: 50%; flex: none; display: grid; place-items: center; color: #fff; background: var(--violet-grad); }
+.island-btn { flex: none; height: 34px; padding: 0 14px; border-radius: 17px; background: #fff; color: #0B0A10; font-size: 14px; font-weight: 700; }
+.island-x { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: rgba(255, 255, 255, .6); }
+.toasts .island { min-height: 60px; }
+@media (prefers-color-scheme: dark) { .island { background: #1D1C26; box-shadow: 0 0 0 0.5px rgba(255, 255, 255, .14), 0 12px 34px -8px rgba(0, 0, 0, .8); } }
+/* ongoing call, shrunk: a small pill under the island with a live timer */
+.call-pill { position: fixed; top: calc(var(--safe-t) + 8px); left: 50%; transform: translateX(-50%); z-index: 97; width: auto; min-width: 150px; max-width: 70vw; min-height: 36px;
+  padding: 0 14px; gap: 8px; border-radius: 18px; font-size: 14px; font-weight: 600; justify-content: center; }
+.call-pill .pill-name { max-width: 40vw; }
+.pill-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); flex: none; }
+.call-pill.live .pill-dot { background: #34D17A; animation: breathe 1.4s ease-in-out infinite; }
+.call-pill .mono { color: #34D17A; font-size: 14px; }
+.call.mini { opacity: 0; pointer-events: none; z-index: -1; }
+.call-min { position: absolute; left: 12px; top: calc(var(--safe-t) + 8px); z-index: 3; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: rgba(255, 255, 255, .12); }
 
 /* empty + spinner */
 .empty { margin: 30px 24px; text-align: center; color: var(--muted); }
@@ -377,7 +400,14 @@ section > .btn.block { width: auto; margin: 10px 16px 0; }
 .ring h2 { font-size: 30px; font-weight: 800; margin: 22px 0 4px; }
 .ring .muted { color: rgba(255,255,255,.7); }
 .ring-msg { font-size: 17px; max-width: 320px; margin: 14px auto; }
-.ring-actions { display: flex; gap: 16px; justify-content: center; margin-top: 40px; }
+.ring-actions { display: flex; gap: 72px; justify-content: center; margin-top: 56px; }
+.ring-act { display: flex; flex-direction: column; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; color: rgba(255,255,255,.85); }
+.ring-btn { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
+.ring-btn.no { background: var(--danger); }
+.ring-btn.no .ic { transform: rotate(135deg); }
+.ring-btn.yes { background: #22C065; }
+.ring-btn:active { transform: scale(.92); }
+.ring-kind { font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: rgba(255,255,255,.6); margin-bottom: 28px !important; }
 .ring-pulse { display: inline-block; border-radius: 50%; animation: pulse 1.6s infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, .45); } 100% { box-shadow: 0 0 0 40px rgba(255, 255, 255, 0); } }
 
@@ -495,13 +525,15 @@ video.hidden { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .ring-pulse::before, .ring-pulse::after { content: ''; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid rgba(255,255,255,.5); animation: ripple 2s infinite; }
 .ring-pulse::after { animation-delay: 1s; }
 @keyframes ripple { from { transform: scale(.9); opacity: .9; } to { transform: scale(1.8); opacity: 0; } }
-.ring-actions .btn.success { animation: breathe-btn 1.4s ease-in-out infinite; }
+.ring-btn.yes { animation: breathe-btn 1.4s ease-in-out infinite; }
 @keyframes breathe-btn { 50% { transform: scale(1.07); box-shadow: 0 0 0 10px rgba(47, 203, 130, .18); } }
 .ring { animation: rise-in .45s var(--spring); }
 
-/* toasts */
-.toast { animation: toast-in .5s var(--spring); }
-@keyframes toast-in { from { transform: translateY(-120%) scale(.96); opacity: 0; } }
+/* island: grows out of a small pill at the top, like the hardware island expanding */
+.island { animation: island-in .55s var(--spring) both; }
+.call-pill { animation: pill-in .5s var(--spring) both; }
+@keyframes island-in { from { transform: scale(.32, .6); opacity: 0; border-radius: 40px; } 40% { opacity: 1; } }
+@keyframes pill-in { from { transform: translateX(-50%) scale(.5); opacity: 0; } }
 
 /* ---------- login ---------- */
 .login { position: relative; min-height: 100dvh; max-width: 460px; margin: 0 auto; padding: calc(var(--safe-t) + 40px) 22px calc(30px + var(--safe-b));

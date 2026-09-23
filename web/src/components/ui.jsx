@@ -120,11 +120,11 @@ export function Toasts() {
   const { toasts, dismissToast, navigate } = useApp();
   const { pathname } = useLocation();
   return (
-    <div className="toasts">
+    <div className="toasts island-wrap">
       {toasts.filter((t) => t.url !== pathname).map((t) => (
-        <button key={t.tid} className="toast glass" onClick={() => { dismissToast(t.tid); t.url && navigate(t.url); }}>
-          <strong>{t.title}</strong>
-          {t.body && <span>{t.body}</span>}
+        <button key={t.tid} className="toast island" onClick={() => { dismissToast(t.tid); t.url && navigate(t.url); }}>
+          {t.user ? <Avatar user={t.user} size={36} /> : t.planner ? <Orb size={36} /> : <span className="island-ic"><Icon name={t.icon || 'bell'} size={17} /></span>}
+          <span className="grow"><strong className="ellipsis">{t.title}</strong>{t.body && <span className="ellipsis">{t.body}</span>}</span>
         </button>
       ))}
     </div>

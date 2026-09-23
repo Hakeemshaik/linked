@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { get, post, getToken, setToken } from './api.js';
 import { connectRealtime } from './realtime.js';
+import { unlockAudioOnTouch } from './sound.js';
 import { registerSW, syncPush } from './push.js';
 
 const Ctx = createContext(null);
@@ -57,6 +58,7 @@ export function AppProvider({ children, navigate }) {
   };
   const logout = () => { post('/presence', { visible: false }, { keepalive: true }).catch(() => {}); setToken(null); setTok(null); setMe(null); navRef.current('/', { replace: true }); };
 
+  useEffect(() => unlockAudioOnTouch(), []);
   useEffect(() => {
     registerSW();
     get('/config').then(setConfig).catch(() => {});
@@ -104,7 +106,7 @@ export function AppProvider({ children, navigate }) {
         setChatUnread((c) => c + 1);
       } else setUnread((u) => u + 1);
       if (n.kind === 'invite_call' || n.kind === 'invite_chill') return; // ring modal handles it
-      toast({ title: n.title, body: n.body, url: n.url });
+      toast({ title: n.title, body: n.body, url: n.url, user: n.data?.from, planner: n.kind === 'message' && !n.data?.from });
     });
     s.on('invite', (inv) => setIncoming(inv));
     // The caller hung up or gave up: stop ringing.

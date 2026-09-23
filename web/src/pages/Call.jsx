@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
 import { useApp } from '../lib/store.jsx';
 import { post } from '../lib/api.js';
 import { Avatar, Icon } from '../components/ui.jsx';
+import { ring } from '../lib/sound.js';
 
 function Video({ stream, muted, mirror, hidden }) {
   const ref = useRef(null);
@@ -10,8 +10,11 @@ function Video({ stream, muted, mirror, hidden }) {
   return <video ref={ref} autoPlay playsInline muted={muted} className={`${mirror ? 'mirror' : ''} ${hidden ? 'hidden' : ''}`} />;
 }
 
-export default function Call() {
-  const { room } = useParams();
+/**
+ * A call stays alive while you use the rest of the app: leaving the call screen shrinks it into
+ * the island pill at the top (see CallLayer in main.jsx). Only Leave, or everyone else hanging up, ends it.
+ */
+export default function Call({ room, minimized, onClose }) {
   const { rt, config, me, navigate } = useApp();
   const [local, setLocal] = useState(null);
   const [peers, setPeers] = useState([]); // [{ peerId, user, stream, mic, cam, state }]
@@ -29,7 +32,9 @@ export default function Call() {
   const everJoined = useRef(false);
   const endTimer = useRef(null);
 
-  const back = () => navigate(window.history.length > 1 ? -1 : '/');
+  const onCallScreen = () => location.pathname.startsWith('/call/');
+  const minimize = () => navigate(window.history.length > 1 ? -1 : '/');
+  const back = () => { onClose?.(); if (onCallScreen()) minimize(); };
   // Show why the call is over for a moment, then go back.
   const end = (why) => {
     if (endTimer.current) return;
@@ -176,6 +181,10 @@ export default function Call() {
     else if (everJoined.current) end('Call ended');
   }, [peers.length]); // eslint-disable-line
 
+  // Caller hears a soft ringback while it rings.
+  const ringingOut = !ended && !peers.length && ringing.some((r) => r.status === 'pending');
+  useEffect(() => (ringingOut ? ring('ringback') : undefined), [ringingOut]);
+
   // Everyone we rang said no.
   useEffect(() => {
     if (everJoined.current || !ringing.length || !ringing.every((r) => r.status === 'declined')) return;
@@ -207,7 +216,10 @@ export default function Call() {
   };
   const hangup = () => { clearTimeout(endTimer.current); back(); };
 
-  const secs = Math.floor((Date.now() - started) / 1000);
+  const connectedAt = useRef(0);
+  if (peers.some((p) => p.state === 'connected') && !connectedAt.current) connectedAt.current = Date.now();
+  // The timer starts when someone picks up, like a phone call.
+  const secs = Math.floor((Date.now() - (connectedAt.current || started)) / 1000);
   const dur = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
   const connected = peers.some((p) => p.state === 'connected');
   const first = (u) => u?.display_name?.split(' ')[0] || 'Friend';
@@ -217,8 +229,18 @@ export default function Call() {
     || (joining.length ? `${joining.map((r) => first(r.user)).join(', ')} ${joining.length > 1 ? 'are' : 'is'} joining…`
       : waitingFor.length ? `Ringing ${waitingFor.map((r) => first(r.user)).join(', ')}…` : 'Connecting…');
 
+  const names = peers.map((p) => first(p.user)).join(', ') || waitingFor.map((r) => first(r.user)).join(', ');
   return (
-    <div className="call">
+    <>
+    {minimized && (
+      <button className={`island call-pill ${connected ? 'live' : ''}`} onClick={() => navigate(`/call/${room}`)} aria-label="Back to the call">
+        <span className="pill-dot" />
+        <span className="pill-name ellipsis">{ended || names || 'Call'}</span>
+        <span className="mono">{ended ? '' : connected ? dur : '…'}</span>
+      </button>
+    )}
+    <div className={`call ${minimized ? 'mini' : ''}`} aria-hidden={minimized}>
+      <button className="call-min" onClick={minimize} aria-label="Minimise call"><Icon name="down" size={26} /></button>
       <div className={`call-grid n${Math.min(peers.length, 4)}`}>
         {peers.length === 0 && (
           <div className="call-waiting">
@@ -243,5 +265,6 @@ export default function Call() {
         <button className="cbtn hang" onClick={hangup}><Icon name="phone" /><small>Leave</small></button>
       </div>
     </div>
+    </>
   );
 }
