@@ -52,7 +52,7 @@ export default function Calls() {
         {[['all', 'All'], ['missed', 'Missed']].map(([k, l]) => <button key={k} className={`filter ${filter === k ? 'on' : ''}`} onClick={() => setFilter(k)}>{l}</button>)}
       </div>
 
-      {calls && list.length === 0 && <Empty title={filter === 'missed' ? 'No missed calls' : 'No calls yet'}>Tap a friend above to video call them. Their phone rings.</Empty>}
+      {calls && list.length === 0 && <Empty art="calls" title={filter === 'missed' ? 'No missed calls' : 'No calls yet'}>Tap a friend above to video call them. Their phone rings.</Empty>}
       {list.length > 0 && (
         <div className="group-list">
           {list.map((c) => (

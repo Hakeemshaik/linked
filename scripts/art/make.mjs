@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import gifenc from 'gifenc';
 const { GIFEncoder, quantize, applyPalette } = gifenc;
-import { AVATARS, EMOJI, STICKERS, GIFS } from './sets.mjs';
+import { AVATARS, EMOJI, STICKERS, GIFS, SCENES } from './sets.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const OUT = path.join(ROOT, 'web/public/art');
@@ -16,6 +16,7 @@ const write = (rel, data) => { const f = path.join(OUT, rel); fs.mkdirSync(path.
 for (const a of AVATARS) write(`avatars/${a.id}.svg`, a.svg());
 for (const e of EMOJI) write(`emoji/${e.id}.svg`, e.svg());
 for (const s of STICKERS) write(`stickers/${s.id}.svg`, s.svg());
+for (const s of SCENES) write(`scenes/${s.id}.svg`, s.svg());
 
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 const page = await browser.newPage();
@@ -80,8 +81,9 @@ export const avatarUrl = (id) => \`/art/avatars/\${id}.svg\`;
 export const emojiUrl = (id) => \`/art/emoji/\${id}.svg\`;
 export const stickerUrl = (id) => \`/art/stickers/\${id}.svg\`;
 export const gifUrl = (id) => \`/art/gifs/\${id}.gif\`;
+export const sceneUrl = (id) => \`/art/scenes/\${id}.svg\`;
 export const EMOJI_IDS = new Set(EMOJI.map((e) => e.id));
 `);
 const size = (d) => fs.readdirSync(path.join(OUT, d)).reduce((n, f) => n + fs.statSync(path.join(OUT, d, f)).size, 0);
-console.log(`art: ${AVATARS.length} avatars, ${EMOJI.length} emoji, ${STICKERS.length} stickers, ${GIFS.length} GIFs`,
-  `(${['avatars', 'emoji', 'stickers', 'gifs'].map((d) => `${d} ${Math.round(size(d) / 1024)}KB`).join(', ')})`);
+console.log(`art: ${AVATARS.length} avatars, ${EMOJI.length} emoji, ${STICKERS.length} stickers, ${GIFS.length} GIFs, ${SCENES.length} scenes`,
+  `(${['avatars', 'emoji', 'stickers', 'gifs', 'scenes'].map((d) => `${d} ${Math.round(size(d) / 1024)}KB`).join(', ')})`);

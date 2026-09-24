@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240"><defs><filter id="cut" x="-15%" y="-15%" width="130%" height="130%">
   <feMorphology in="SourceAlpha" operator="dilate" radius="6" result="d"/><feFlood flood-color="#fff"/><feComposite in2="d" operator="in" result="edge"/>
   <feGaussianBlur in="d" stdDeviation="3.5" result="b"/><feOffset in="b" dy="4" result="bo"/><feFlood flood-color="#1B1340" flood-opacity=".22"/><feComposite in2="bo" operator="in" result="shadow"/>
-  <feMerge><feMergeNode in="shadow"/><feMergeNode in="edge"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#cut)"><g transform="translate(36 8) scale(1.68)"><defs><radialGradient id="o20" cx=".42" cy=".36" r=".72"><stop offset="0" stop-color="#fff"/><stop offset=".62" stop-color="#EEE8FA"/><stop offset="1" stop-color="#C9BEE3"/></radialGradient>
-    <radialGradient id="m23" cx=".5" cy=".5" r=".5"><stop offset=".45" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
-    <clipPath id="c21"><circle cx="50" cy="50" r="40"/></clipPath><filter id="f22" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3.5999999999999996"/></filter></defs>
-    <circle cx="50" cy="50" r="40" fill="url(#o20)"/>
-    <g clip-path="url(#c21)"><g filter="url(#f22)" transform="rotate(0 50 50)">
+  <feMerge><feMergeNode in="shadow"/><feMergeNode in="edge"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#cut)"><g transform="translate(36 8) scale(1.68)"><defs><radialGradient id="o29" cx=".42" cy=".36" r=".72"><stop offset="0" stop-color="#fff"/><stop offset=".62" stop-color="#EEE8FA"/><stop offset="1" stop-color="#C9BEE3"/></radialGradient>
+    <radialGradient id="m32" cx=".5" cy=".5" r=".5"><stop offset=".45" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <clipPath id="c30"><circle cx="50" cy="50" r="40"/></clipPath><filter id="f31" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3.5999999999999996"/></filter></defs>
+    <circle cx="50" cy="50" r="40" fill="url(#o29)"/>
+    <g clip-path="url(#c30)"><g filter="url(#f31)" transform="rotate(0 50 50)">
       <circle cx="19.835896391520816" cy="42.027117616762865" r="14.399999999999999" fill="#3D5BFF"/><circle cx="37.49506583110477" cy="21.415622773417006" r="12" fill="#6A55FF"/><circle cx="64.61772014457176" cy="22.436214741531224" r="13.600000000000001" fill="#8A4DFF"/><circle cx="80.57807722864673" cy="56.19848312080591" r="12.8" fill="#FF7AC6"/><circle cx="66.85743194308596" cy="76.25389472600637" r="8" fill="#FF9AD5"/></g>
-      <circle cx="50" cy="50" r="24.8" fill="url(#m23)"/></g>
+      <circle cx="50" cy="50" r="24.8" fill="url(#m32)"/></g>
     <circle cx="50" cy="50" r="39.2" fill="none" stroke="#fff" stroke-width="1.6" opacity=".9"/>
     <ellipse cx="42" cy="27.599999999999998" rx="13.600000000000001" ry="5.6000000000000005" fill="#fff" opacity=".95"/><circle cx="82" cy="80" r="16" fill="#22C065"/><path d="M74 80 L80 86 L90 74" stroke="#fff" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g><text x="120" y="186" text-anchor="middle" font-family="'SF Pro Rounded','Arial Rounded MT Bold','Nunito','Segoe UI',system-ui,sans-serif" font-weight="900" font-size="30" fill="#6B4EFF" stroke="#2A1B3D" stroke-width="2.4" paint-order="stroke" letter-spacing=".5" transform="rotate(-4 120 186)">PLANNER OK</text></g></svg>

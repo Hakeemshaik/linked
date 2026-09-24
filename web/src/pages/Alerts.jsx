@@ -59,7 +59,7 @@ export default function Alerts() {
       </section>
 
       <h2 className="list-label">Recent</h2>
-      {!list ? <div className="spinner" /> : list.length === 0 ? <Empty title="All caught up">Invites, replies and reminders show up here.</Empty> : <div className="group-list">{list.map((n) => (
+      {!list ? <div className="spinner" /> : list.length === 0 ? <Empty art="alerts" title="All caught up">Invites, replies and reminders show up here.</Empty> : <div className="group-list">{list.map((n) => (
         <button key={n.id} className={`row-item notif ${n.read ? '' : 'is-unread'}`} onClick={() => open(n)}>
           <span className="qi" style={{ '--c': (KIND_ICON[n.kind] || KIND_ICON.test)[1] }}><Icon name={(KIND_ICON[n.kind] || KIND_ICON.test)[0]} /></span>
           <span className="grow"><b>{n.title}</b><small className="wrap">{n.body}</small></span>

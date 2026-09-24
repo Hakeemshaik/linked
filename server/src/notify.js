@@ -6,7 +6,7 @@ import { sendPush } from './push.js';
  * Create a notification for each user: store it, deliver in-app live, and send a Web Push
  * with the full content when the app isn't open on screen.
  *
- * opts: { kind, title, body, url, data, actions: [{action,title,url}], tag, requireInteraction, alwaysPush, store, ttl }
+ * opts: { kind, title, body, url, data, actions: [{action,title,url}], tag, requireInteraction, alwaysPush, store, ttl, image }
  * ttl: seconds a push may wait for an offline phone (calls use 45, so nobody rings late for an old call).
  */
 export async function notify(userIds, opts) {
@@ -45,6 +45,7 @@ export async function notify(userIds, opts) {
         requireInteraction: !!opts.requireInteraction,
         from: opts.data?.from || null,
         icon: opts.data?.from?.avatar ? `/art/avatars/${opts.data.from.avatar}.png` : undefined,
+        image: opts.image, // a sent photo: Android shows it in the notification
         ttl: opts.ttl,
         timestamp: Date.now(),
       }).catch((e) => console.warn('[push] error', e.message)));

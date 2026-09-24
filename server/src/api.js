@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import {
@@ -10,7 +11,7 @@ import {
 } from './realtime.js';
 import { notify } from './notify.js';
 import { vapid, saveSubscription, removeSubscription, sendPush } from './push.js';
-import { runAI, normalizePlan, aiInfo, aiErrorText, aiHeaders, aiMisconfigured } from './ai.js';
+import { runAI, converse, normalizePlan, aiInfo, aiErrorText, aiHeaders, aiMisconfigured } from './ai.js';
 import { formatWhen, zonedToDate, TZ } from './time.js';
 import { remindAt, scheduleReminder, runReminders, queueUpcoming, maybeRunReminders, remindersKind, baseUrl } from './scheduler.js';
 import { background } from './background.js';
@@ -72,12 +73,14 @@ api.get('/config', wrap(async (req, res) => {
 // What's connected. Open /api/health after deploying to check the setup.
 api.get('/health', wrap(async (req, res) => {
   let database = 'ok';
-  try { await one('SELECT 1 AS x'); } catch (e) { database = `error: ${e.message}`; }
+  let stored = 0;
+  try { stored = Number((await one('SELECT COALESCE(SUM(size), 0) AS n FROM media')).n); } catch (e) { database = `error: ${e.message}`; }
   res.json({
     ok: database === 'ok' && realtimeKind !== 'none',
     database: `${dbKind === 'postgres' ? 'postgres' : 'local (embedded)'}: ${database}`,
     realtime: { pusher: 'pusher', sse: 'local stream', none: 'missing: set the PUSHER_* variables' }[realtimeKind],
     calls: relayKind ? `relay: ${relayKind}` : 'direct only: add a TURN relay (see README) or calls on mobile data may not connect',
+    media: `${(stored / 1048576).toFixed(1)} MB of photos and voice messages`,
     reminders: { qstash: 'qstash + daily sweep', timer: 'local timer', 'cron-only': 'daily sweep only: set QSTASH_TOKEN for on-time reminders' }[remindersKind],
     planner: aiMisconfigured ? 'not set: add LLM_BASE_URL (your tunnel URL ending in /v1) and redeploy' : aiInfo.model,
   });
@@ -146,7 +149,42 @@ api.get('/realtime/stream', wrap(async (req, res) => {
   req.on('close', () => { clearInterval(ping); remove(); });
 }));
 
+// Photos and voice messages. Public like any image link, but the id is 128 random bits, so it can't be guessed.
+// Supports byte ranges: iPhones only play audio from servers that do.
+const MEDIA_KIND = {
+  'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image', 'image/gif': 'image',
+  'audio/mp4': 'voice', 'audio/x-m4a': 'voice', 'audio/aac': 'voice', 'audio/mpeg': 'voice', 'audio/webm': 'voice', 'audio/ogg': 'voice',
+};
+const MEDIA_ID = /^[a-f0-9]{32}$/;
+api.get('/media/:id', wrap(async (req, res) => {
+  const m = MEDIA_ID.test(req.params.id) && await one('SELECT type, size, data FROM media WHERE id = ?', [req.params.id]);
+  if (!m) return bad(res, 'Not found', 404);
+  const buf = Buffer.from(m.data);
+  res.set({ 'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes', 'Content-Type': m.type });
+  const r = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (r && (r[1] || r[2])) {
+    let start = r[1] ? Number(r[1]) : Math.max(0, buf.length - Number(r[2]));
+    let end = r[1] && r[2] ? Math.min(Number(r[2]), buf.length - 1) : buf.length - 1;
+    if (start >= buf.length || start > end) return res.status(416).set('Content-Range', `bytes */${buf.length}`).end();
+    return res.status(206).set('Content-Range', `bytes ${start}-${end}/${buf.length}`).send(buf.subarray(start, end + 1));
+  }
+  res.send(buf);
+}));
+
 api.use(wrap(requireAuth));
+
+// Upload a photo or voice message (the raw file as the body), then send it as a message.
+api.post('/media', express.raw({ type: () => true, limit: '4mb' }), wrap(async (req, res) => {
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (!MEDIA_KIND[type]) return bad(res, 'Only photos and voice messages can be sent');
+  const convId = String(req.query.conversation_id || '');
+  if (!(await isMember(convId, req.user.id))) return bad(res, 'Not found', 404);
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return bad(res, 'The file was empty');
+  const mid = crypto.randomBytes(16).toString('hex');
+  await run('INSERT INTO media (id, owner_id, conversation_id, type, size, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [mid, req.user.id, convId, type, req.body.length, req.body, now()]);
+  res.json({ media: { id: mid, url: `/api/media/${mid}`, type, kind: MEDIA_KIND[type], size: req.body.length } });
+}));
 
 // Your invite link. Always on the production address, so a link shared from a preview deployment still works.
 api.get('/invite-link', wrap(async (req, res) => {
@@ -532,7 +570,7 @@ async function ensureAIConversation(uid) {
   await run(`INSERT INTO conversations (id, name, is_group, is_ai) VALUES (?, 'Planner', 0, 1)`, [cid]);
   await run('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)', [cid, uid]);
   await run(`INSERT INTO messages (id, conversation_id, sender_id, kind, body, created_at) VALUES (?, ?, NULL, 'ai', ?, ?)`, [
-    id(), cid, "I'm Planner. Tell me what you want to do and who with. I'll find a time you're all free, book it and set a reminder.", now(),
+    id(), cid, "Hi! I'm Planner. Ask me anything, or tell me what you want to do and who with. I'll find a time you're all free, book it and remind everyone.", now(),
   ]);
   return cid;
 }
@@ -638,6 +676,24 @@ async function reactionsFor(ids) {
   return out;
 }
 
+const clock = (sec) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
+/** A short copy of a message for a reply's quote, so the quote survives edits and deletes. */
+function quoteOf(o) {
+  const q = { id: o.id, kind: o.kind, body: String(o.body || '').slice(0, 140), sender_id: o.sender_id, sender_name: o.sender_id ? o.display_name : 'Planner' };
+  if (o.data?.ref) q.ref = o.data.ref;
+  if (o.kind === 'image' && o.data?.thumb) q.thumb = o.data.thumb;
+  if (o.kind === 'voice') q.duration = o.data?.duration || 0;
+  return q;
+}
+/** How a message reads on a lock screen or in a chat preview. */
+function messageText(kind, body, data) {
+  if (kind === 'sticker') return 'Sent a sticker';
+  if (kind === 'gif') return 'Sent a GIF';
+  if (kind === 'image') return body ? `Photo: ${lockScreenText(body)}` : 'Photo';
+  if (kind === 'voice') return `Voice message (${clock(data?.duration || 0)})`;
+  return lockScreenText(body);
+}
+
 async function postMessage(convId, sender, kind, body, data = null, clientId = null) {
   const mid = id();
   const ts = now();
@@ -651,7 +707,7 @@ async function postMessage(convId, sender, kind, body, data = null, clientId = n
 
   const from = sender ? sender.display_name : 'Planner';
   let title = conv.is_group ? `${from} in ${conv.name || 'group chat'}` : from;
-  let text = kind === 'sticker' ? 'Sent a sticker' : kind === 'gif' ? 'Sent a GIF' : lockScreenText(body);
+  let text = messageText(kind, body, data);
   if (kind === 'plan' && data?.plan) {
     const p = data.plan;
     title = `Planner suggested: ${p.title}`;
@@ -662,6 +718,7 @@ async function postMessage(convId, sender, kind, body, data = null, clientId = n
     notify(members.filter((u) => u !== sender?.id), {
       kind: 'message', title, body: text.slice(0, 240), url: `/chat/${convId}`, tag: `chat-${convId}`,
       data: { conversation_id: convId, from: sender ? publicUser(sender) : null }, store: kind === 'plan',
+      image: kind === 'image' ? data.url : undefined,
     }),
   ]);
   return msg;
@@ -675,16 +732,45 @@ async function claimAI(convId) {
 }
 const aiBusy = async (convId) => ((await one('SELECT ai_busy_until FROM conversations WHERE id = ?', [convId]))?.ai_busy_until || '') > now();
 
-async function aiRespond(convId, requesterId, mode, instruction) {
-  if (!(await claimAI(convId))) return;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Ways to ask Planner in any chat: "@Planner ...", "@ai ...", "Planner, ...", "Hey Planner ...", or replying to it.
+const AI_CALL = /(^|\s)@(ai|planner)\b/i;
+const AI_HEY = /^\s*(?:(?:hey|hi|yo|ok|okay)\s+planner\b|planner\s*[,:!?])/i;
+const askedPlanner = (body) => AI_CALL.test(body) || AI_HEY.test(body);
+const withoutCall = (body) => body.replace(/@(ai|planner)\b[,:]?/gi, '').replace(/^\s*(?:(?:hey|hi|yo|ok|okay)\s+)?planner\b\s*[,:!?]?/i, '').trim();
+
+async function aiRespond(convId, requesterId, mode, instruction, trigger = null) {
+  // One answer at a time per chat: a question asked meanwhile waits its turn instead of being dropped.
+  let claimed = false;
+  for (let i = 0; i < 40 && !(claimed = await claimAI(convId)); i++) await sleep(1500);
+  if (!claimed) return;
   const members = await memberIds(convId);
+  const conv = await one('SELECT is_ai FROM conversations WHERE id = ?', [convId]);
+  if (mode === 'reply' && trigger && conv?.is_ai) {
+    // Several quick messages in your Planner chat get one answer, to the last of them.
+    await sleep(1200);
+    const newer = await one('SELECT id FROM messages WHERE conversation_id = ? AND sender_id = ? AND created_at > ? LIMIT 1', [convId, requesterId, trigger.created_at]);
+    if (newer) return void (await run('UPDATE conversations SET ai_busy_until = NULL WHERE id = ?', [convId]));
+  }
   await emitToUsers(members, 'ai:thinking', { conversation_id: convId, on: true });
   try {
-    const conv = await one('SELECT is_ai FROM conversations WHERE id = ?', [convId]);
     // Your private Planner chat can see and invite all your friends.
     const opts = conv?.is_ai ? { memberIdsOverride: [requesterId, ...(await friendIds(requesterId))], personal: true } : {};
-    const { reply, plan } = await runAI(convId, { mode, requesterId, instruction, ...opts });
-    if (reply) await postMessage(convId, null, 'ai', reply);
+    let reply, plan;
+    if (mode === 'reply') {
+      // Stream the answer into the chat as it's written, a couple of updates a second.
+      let seq = 0, at = 0, chain = Promise.resolve();
+      const onText = (text) => {
+        if (Date.now() - at < 500) return;
+        at = Date.now();
+        const n = ++seq;
+        chain = chain.then(() => emitToUsers(members, 'ai:stream', { conversation_id: convId, seq: n, text: text.slice(0, 3500) })).catch(() => {});
+      };
+      ({ reply, plan } = await converse(convId, { requesterId, instruction, trigger, onText, ...opts }));
+      await chain;
+    } else ({ reply, plan } = await runAI(convId, { mode, requesterId, instruction, ...opts }));
+    // In a group, the answer quotes the question so everyone sees what it's answering.
+    if (reply) await postMessage(convId, null, 'ai', reply, trigger && !conv?.is_ai ? { reply: quoteOf(trigger) } : null);
     if (plan) await postMessage(convId, null, 'plan', plan.title, { plan, status: 'proposed', requested_by: requesterId });
     else if (mode === 'plan' && !reply) await postMessage(convId, null, 'ai', "I couldn't find a plan in the chat yet. Mention what, when and where and tap Plan it again.");
   } catch (e) {
@@ -699,17 +785,33 @@ async function aiRespond(convId, requesterId, mode, instruction) {
 api.post('/conversations/:id/messages', wrap(async (req, res) => {
   const convId = req.params.id;
   if (!(await isMember(convId, req.user.id))) return bad(res, 'Not found', 404);
-  // Stickers and GIFs are the app's own art, sent by id.
-  const kind = ['sticker', 'gif'].includes(req.body?.kind) ? req.body.kind : 'text';
+  // Stickers and GIFs are the app's own art, sent by id. Photos and voice messages are uploaded to /media first.
+  const kind = ['sticker', 'gif', 'image', 'voice'].includes(req.body?.kind) ? req.body.kind : 'text';
   const clientId = /^[a-z0-9]{4,40}$/i.test(req.body?.client_id || '') ? req.body.client_id : null;
   // Replying: keep a short copy of the message being answered, so the quote survives edits and deletes.
   let reply = null;
   if (req.body?.reply_to) {
     const o = parseRow(await one('SELECT m.id, m.kind, m.body, m.data, m.sender_id, u.display_name FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.id = ? AND m.conversation_id = ?', [req.body.reply_to, convId]));
-    if (o && o.kind !== 'deleted') {
-      reply = { id: o.id, kind: o.kind, body: String(o.body || '').slice(0, 140), sender_id: o.sender_id, sender_name: o.sender_id ? o.display_name : 'Planner' };
-      if (o.data?.ref) reply.ref = o.data.ref;
+    if (o && o.kind !== 'deleted') reply = quoteOf(o);
+  }
+  if (kind === 'image' || kind === 'voice') {
+    const mid = String(req.body?.media || '');
+    const m = MEDIA_ID.test(mid) && await one('SELECT id, type, size, owner_id, conversation_id FROM media WHERE id = ?', [mid]);
+    if (!m || m.owner_id !== req.user.id || m.conversation_id !== convId || MEDIA_KIND[m.type] !== kind) return bad(res, 'Send the file again');
+    const data = { media: m.id, url: `/api/media/${m.id}`, type: m.type, size: m.size, ...(reply ? { reply } : {}) };
+    let body = '';
+    if (kind === 'image') {
+      const dim = (v) => Math.min(10000, Math.max(1, Math.round(Number(v)) || 1));
+      Object.assign(data, { w: dim(req.body.w), h: dim(req.body.h) });
+      const thumb = String(req.body.thumb || '');
+      if (/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(thumb) && thumb.length < 6000) data.thumb = thumb;
+      body = String(req.body.body || '').trim().slice(0, 1000);
+    } else {
+      data.duration = Math.min(900, Math.max(0.3, Number(req.body.duration) || 1));
+      const wave = String(req.body.wave || '');
+      if (/^[0-9]{1,64}$/.test(wave)) data.wave = wave;
     }
+    return res.json({ message: await postMessage(convId, req.user, kind, body, data, clientId) });
   }
   if (kind !== 'text') {
     if (!ART_ID.test(req.body?.ref || '')) return bad(res, 'Unknown sticker');
@@ -719,7 +821,11 @@ api.post('/conversations/:id/messages', wrap(async (req, res) => {
   if (!body) return bad(res, 'Empty message');
   const msg = await postMessage(convId, req.user, 'text', body, reply ? { reply } : null, clientId);
   const conv = await one('SELECT is_ai FROM conversations WHERE id = ?', [convId]);
-  if (conv.is_ai || /(^|\s)@ai\b/i.test(body)) background(aiRespond(convId, req.user.id, 'reply', body.replace(/@ai\b/gi, '').trim()));
+  const toPlanner = reply && !reply.sender_id && reply.kind !== 'plan'; // replying to one of Planner's messages
+  if (conv.is_ai || toPlanner || askedPlanner(body)) {
+    const trigger = { id: msg.id, kind: 'text', body, sender_id: req.user.id, display_name: req.user.display_name, created_at: msg.created_at, quoted: reply };
+    background(aiRespond(convId, req.user.id, 'reply', withoutCall(body) || body, trigger));
+  }
   res.json({ message: msg });
 }));
 
@@ -744,7 +850,7 @@ api.post('/messages/:id/react', wrap(async (req, res) => {
     // Tell the author, like any other message (one notification per message, replaced if they change it).
     if (m.sender_id && m.sender_id !== req.user.id) {
       const conv = await one('SELECT name, is_group FROM conversations WHERE id = ?', [m.conversation_id]);
-      const what = m.kind === 'sticker' ? 'your sticker' : m.kind === 'gif' ? 'your GIF' : `"${lockScreenText(m.body).slice(0, 80)}"`;
+      const what = { sticker: 'your sticker', gif: 'your GIF', image: 'your photo', voice: 'your voice message' }[m.kind] || `"${lockScreenText(m.body).slice(0, 80)}"`;
       background(notify([m.sender_id], {
         kind: 'reaction', title: conv?.is_group ? `${req.user.display_name} in ${conv.name || 'group chat'}` : req.user.display_name,
         body: `Reacted ${EMOJI_TEXT[emoji]} to ${what}`, url: `/chat/${m.conversation_id}`, tag: `react-${m.id}`,
@@ -763,6 +869,8 @@ api.delete('/messages/:id', wrap(async (req, res) => {
   if (!m || m.sender_id !== req.user.id) return bad(res, 'You can only delete your own messages', 403);
   await run(`UPDATE messages SET kind = 'deleted', body = '', data = NULL WHERE id = ?`, [m.id]);
   await run('DELETE FROM reactions WHERE message_id = ?', [m.id]);
+  const media = parseRow({ data: m.data }).data?.media;
+  if (media) await run('DELETE FROM media WHERE id = ? AND owner_id = ?', [media, req.user.id]);
   const updated = { ...m, kind: 'deleted', body: '', data: null, reactions: {}, sender: publicUser(req.user) };
   await emitToUsers(await memberIds(m.conversation_id), 'message:update', updated);
   res.json({ message: updated });

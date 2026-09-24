@@ -8,6 +8,9 @@ import { fmtRange, fmtTime, relDay, dayKey } from '../lib/dates.js';
 import ArtPicker from '../components/ArtPicker.jsx';
 import RichText, { emojiOnly } from '../components/RichText.jsx';
 import { EMOJI, emojiUrl, stickerUrl, gifUrl } from '../lib/art.js';
+import { uploadMedia, mediaUrl, savePhoto } from '../lib/media.js';
+import { PhotoSend, PhotoViewer, photoSize } from '../components/Photos.jsx';
+import { VoiceNote, RecordingBar, useRecorder, canRecord, clock } from '../components/Voice.jsx';
 
 const QUICK = ['love', 'lol', 'hype', 'cheers', 'party', 'meh'];
 const HOLD_MS = 420;
@@ -128,7 +131,7 @@ function Reveal({ text, fresh }) {
     const t = setInterval(() => setN((x) => (x >= words.length ? (clearInterval(t), x) : x + 2)), 45);
     return () => clearInterval(t);
   }, []); // eslint-disable-line
-  return <>{words.slice(0, n).join('')}</>;
+  return <RichText text={words.slice(0, n).join('')} />;
 }
 
 function lastSeen(u) {
@@ -148,9 +151,13 @@ function Quote({ q, me, color, onClick }) {
     <Tag type={onClick ? 'button' : undefined} className="quote" style={{ '--qc': color }} onClick={onClick}>
       <span className="quote-text">
         <b className="ellipsis">{who}</b>
-        <span className="quote-body">{isMedia(q.kind) ? (q.kind === 'gif' ? 'GIF' : 'Sticker') : q.kind === 'plan' ? `Plan: ${q.body}` : <RichText text={q.body} />}</span>
+        <span className="quote-body">{isMedia(q.kind) ? (q.kind === 'gif' ? 'GIF' : 'Sticker')
+          : q.kind === 'image' ? <><Icon name="camera" size={15} className="quote-ic" />{q.body ? <RichText text={q.body} /> : 'Photo'}</>
+          : q.kind === 'voice' ? <><Icon name="mic" size={15} className="quote-ic" />Voice message ({clock(q.duration)})</>
+          : q.kind === 'plan' ? `Plan: ${q.body}` : <RichText text={q.body} />}</span>
       </span>
       {isMedia(q.kind) && q.ref && <img src={q.kind === 'gif' ? gifUrl(q.ref) : stickerUrl(q.ref)} alt="" draggable="false" />}
+      {q.kind === 'image' && q.thumb && <img className="quote-photo" src={q.thumb} alt="" draggable="false" />}
     </Tag>
   );
 }
@@ -242,7 +249,7 @@ function Row({ id, side, first, pop, onHold, onSwipe, onTap, children }) {
 function MessageMenu({ at, side, canReact, reactions, meId, names, onReact, actions, onClose, children }) {
   const [all, setAll] = useState(false);
   const [ask, setAsk] = useState(null);
-  // Lifting the finger that opened the menu isn't a tap outside it: only a new touch closes it.
+  // Lifting the finger that opened the menu isn't a tap on it: only a new touch (or a key) does anything.
   const armed = useRef(false);
   useEffect(() => {
     const k = (e) => e.key === 'Escape' && onClose();
@@ -262,7 +269,8 @@ function MessageMenu({ at, side, canReact, reactions, meId, names, onReact, acti
   const place = side === 'out' ? { right: Math.max(10, vw - at.right) } : { left: Math.max(10, at.left) };
   const mine = (e) => (reactions?.[e] || []).includes(meId);
   return createPortal(
-    <div className="focus-layer" onPointerDown={() => { armed.current = true; }} onClick={() => armed.current && onClose()} onContextMenu={(e) => e.preventDefault()}>
+    <div className="focus-layer" onPointerDown={() => { armed.current = true; }} onContextMenu={(e) => e.preventDefault()}
+      onClickCapture={(e) => { if (!armed.current && e.detail !== 0) { e.stopPropagation(); e.preventDefault(); } }} onClick={onClose}>
       <div className={`focus ${side}`} style={{ top, width: at.width, ...place }} onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Message options">
         {canReact && (
           <div className={`react-bar ${all ? 'all' : ''}`}>
@@ -315,11 +323,15 @@ export function ChatView({ convId: id }) {
   const [older, setOlder] = useState(false);
   const [text, setText] = useState(qs.get('draft') || '');
   const [thinking, setThinking] = useState(false);
+  const [draft, setDraft] = useState(null); // Planner's answer while it's being written
   const [typing, setTyping] = useState(null);
   const [attach, setAttach] = useState(false);
   const [picker, setPicker] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
+  const [photos, setPhotos] = useState(null);
+  const [viewer, setViewer] = useState(null);
+  const fileRef = useRef(null);
   const [jump, setJump] = useState(false);
   const [unseen, setUnseen] = useState(0);
   const listRef = useRef(null);
@@ -336,6 +348,7 @@ export function ChatView({ convId: id }) {
   const lastHeight = useRef(0);
   const unreadMark = useRef(null);
   const loadingOlder = useRef(false);
+  const draftRef = useRef(null);
   const msgsRef = useRef(msgs);
   msgsRef.current = msgs;
 
@@ -367,8 +380,18 @@ export function ChatView({ convId: id }) {
     // Reading the chat clears its notifications from the lock screen.
     navigator.serviceWorker?.ready.then((r) => r.getNotifications({ tag: `chat-${id}` })).then((ns) => ns?.forEach((n) => n.close())).catch(() => {});
     if (qs.get('draft')) { setText(qs.get('draft')); setQs({}, { replace: true }); setTimeout(() => inputRef.current?.focus(), 300); }
+    if (qs.get('ask')) setQs({}, { replace: true });
     return () => { live = false; };
   }, [id]); // eslint-disable-line
+
+  // Asked from the Chats search: send it once the chat is open.
+  const askRef = useRef(qs.get('ask'));
+  useEffect(() => {
+    if (!conv || !askRef.current) return;
+    const q = askRef.current;
+    askRef.current = null;
+    sendText(q);
+  }, [conv]); // eslint-disable-line
 
   const toEnd = (animate) => {
     const el = listRef.current;
@@ -408,7 +431,7 @@ export function ChatView({ convId: id }) {
     if (appended && last?.pending) return toEnd(true); // you just sent it from here
     if (nearEnd.current && (appended || grew)) return toEnd(appended);
     if (appended && last) setUnseen((n) => n + 1);
-  }, [msgs, conv, thinking, typing]); // eslint-disable-line
+  }, [msgs, conv, thinking, typing, draft]); // eslint-disable-line
 
   const loadOlder = async () => {
     const oldest = msgs.find((m) => !m.pending && !m.failed);
@@ -440,13 +463,14 @@ export function ChatView({ convId: id }) {
     const i = x.findIndex((y) => y.id === m.id || (m.client_id && y.client_id === m.client_id));
     if (i < 0) return [...x, m];
     const next = x.slice();
-    next[i] = { ...m, client_id: x[i].client_id || m.client_id };
+    next[i] = { ...m, client_id: x[i].client_id || m.client_id, ...(x[i].local ? { local: x[i].local } : {}) }; // keep showing the local copy
     return next;
   });
 
   useSocket('message', (m) => {
     if (m.conversation_id !== id) return;
-    if (!m.sender_id) freshIds.current.add(m.id);
+    // Planner's words appear one by one, unless they already streamed in.
+    if (!m.sender_id) { if (m.kind === 'ai' && draftRef.current) { draftRef.current = null; setDraft(null); } else freshIds.current.add(m.id); }
     upsert(m);
     if (m.sender_id !== meId) markRead();
     if (m.sender_id) setTyping((t) => (t?.id === m.sender_id ? null : t));
@@ -460,7 +484,16 @@ export function ChatView({ convId: id }) {
     }
   });
   useSocket('message:react', (p) => p.conversation_id === id && setMsgs((x) => x.map((y) => (y.id === p.message_id ? { ...y, reactions: p.reactions } : y))));
-  useSocket('ai:thinking', (p) => p.conversation_id === id && setThinking(p.on));
+  useSocket('ai:thinking', (p) => {
+    if (p.conversation_id !== id) return;
+    setThinking(p.on);
+    if (!p.on) { draftRef.current = null; setDraft(null); }
+  });
+  useSocket('ai:stream', (p) => {
+    if (p.conversation_id !== id || (draftRef.current && draftRef.current.seq >= p.seq)) return;
+    draftRef.current = p;
+    setDraft(p.text);
+  });
   useSocket('read', (p) => p.conversation_id === id && setConv((c) => c && { ...c, reads: { ...c.reads, [p.user_id]: p.at } }));
   useSocket('typing', (p) => {
     if (p.conversation_id !== id) return;
@@ -480,14 +513,26 @@ export function ChatView({ convId: id }) {
     id: m.id, kind: m.kind, body: String(m.body || '').slice(0, 140), sender_id: m.sender_id,
     sender_name: m.sender_id ? (m.sender_id === meId ? self?.display_name : m.sender?.display_name) : 'Planner',
     ...(m.data?.ref ? { ref: m.data.ref } : {}),
+    ...(m.kind === 'image' && m.data?.thumb ? { thumb: m.data.thumb } : {}),
+    ...(m.kind === 'voice' ? { duration: m.data?.duration || 0 } : {}),
   });
 
   // Sending: the message shows at once with a clock, and the server's copy replaces it (matched by client_id).
   // If it fails it stays, marked "Not sent", until you tap it or the phone comes back online.
-  const deliver = async (t) => {
+  const deliver = async (t, after) => {
     setMsgs((x) => [...x.filter((y) => y.id !== t.id), { ...t, pending: true, failed: false }]);
+    const patch = (p) => setMsgs((x) => x.map((y) => (y.id === t.id ? { ...y, ...p } : y)));
+    if (after) await after; // several photos at once go out in the order they were picked
     try {
-      const r = await post(`/conversations/${id}/messages`, { ...t.req, client_id: t.client_id });
+      let req = t.req;
+      // Photos and voice messages upload first; a retry after that only resends the message.
+      if (t.file && !req.media) {
+        let shown = 0;
+        const media = await uploadMedia(id, t.file, (p) => { if (p - shown >= 0.1 || p === 1) { shown = p; patch({ progress: p }); } });
+        req = { ...req, media: media.id };
+        patch({ req });
+      }
+      const r = await post(`/conversations/${id}/messages`, { ...req, client_id: t.client_id });
       upsert(r.message);
     } catch {
       setMsgs((x) => x.map((y) => (y.id === t.id ? { ...y, pending: false, failed: true } : y)));
@@ -501,16 +546,16 @@ export function ChatView({ convId: id }) {
     return () => window.removeEventListener('online', retry);
   }, []);
 
-  const queue = (req, local) => {
+  const queue = (req, local, quoting = replyTo, after = null) => {
     const cid = newId();
     const data = { ...(local.data || {}) };
-    if (replyTo) { req = { ...req, reply_to: replyTo.id }; data.reply = replyData(replyTo); }
+    if (quoting) { req = { ...req, reply_to: quoting.id }; data.reply = replyData(quoting); }
     setReplyTo(null);
     unreadMark.current = null;
-    deliver({
+    return deliver({
       ...local, id: `tmp-${cid}`, client_id: cid, conversation_id: id, sender_id: meId, sender: self,
       created_at: new Date().toISOString(), reactions: {}, data: Object.keys(data).length ? data : null, req,
-    });
+    }, after);
   };
   const sendText = (body) => {
     body = body.trim();
@@ -531,6 +576,32 @@ export function ChatView({ convId: id }) {
   const sendArt = (kind, ref) => {
     setPicker(false);
     queue({ kind, ref }, { kind, body: kind === 'gif' ? 'GIF' : 'Sticker', data: { ref } });
+  };
+  // Photos: pick, look them over with a caption, send (caption goes with the first).
+  const pickPhotos = () => { setAttach(false); fileRef.current?.click(); };
+  const onPicked = (e) => {
+    const files = [...(e.target.files || [])].filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+    e.target.value = '';
+    if (files.length) setPhotos(files);
+  };
+  const sendPhotos = (items, caption) => {
+    items.reduce((prev, p, i) => queue(
+      { kind: 'image', w: p.w, h: p.h, thumb: p.thumb, body: i === 0 ? caption : '' },
+      { kind: 'image', body: i === 0 ? caption : '', data: { w: p.w, h: p.h, thumb: p.thumb }, local: p.local, file: p.blob },
+      i === 0 ? replyTo : null, prev,
+    ), null);
+  };
+  // Voice messages: tap the mic, talk, tap send (or the bin).
+  const sendVoice = async () => {
+    const v = await rec.stop();
+    if (!v) return;
+    if (v.duration < 0.7) return toast({ title: 'Too short', body: 'Tap the mic, talk, then tap send' });
+    queue({ kind: 'voice', duration: v.duration, wave: v.wave }, { kind: 'voice', body: '', data: { duration: v.duration, wave: v.wave }, local: URL.createObjectURL(v.blob), file: v.blob });
+  };
+  const rec = useRecorder({ onLimit: () => sendVoice() });
+  const startVoice = async () => {
+    try { await rec.start(); navigator.vibrate?.(15); }
+    catch (x) { toast({ title: 'Voice message', body: x.message }); }
   };
 
   const startReply = (m) => {
@@ -570,6 +641,19 @@ export function ChatView({ convId: id }) {
   };
   const openMenu = (m, el, side, first) => el && setMenu({ m, at: el.getBoundingClientRect(), side, first });
 
+  // The orb with something typed: ask Planner that, right here in the chat.
+  const askPlanner = () => {
+    const q = text.trim();
+    if (!q) return;
+    sendText(/(^|\s)@(ai|planner)\b/i.test(q) ? q : `@Planner ${q}`);
+    inputRef.current?.focus();
+  };
+  const askAbout = (m) => {
+    setMenu(null);
+    setReplyTo(m);
+    setText((t) => (/@planner/i.test(t) ? t : `@Planner ${t}`));
+    inputRef.current?.focus();
+  };
   const planIt = async () => {
     setAttach(false);
     try { await post(`/conversations/${id}/plan`); } catch (x) { toast({ title: 'Planner', body: x.message }); }
@@ -611,9 +695,11 @@ export function ChatView({ convId: id }) {
   );
 
   const planner = !!conv.is_ai;
+  const recording = rec.state !== 'idle';
+  const voiceOk = !planner && canRecord();
   const others = conv.members.filter((m) => !m.me);
   const planMembers = planner ? [self, ...friends.friends].filter(Boolean) : conv.members;
-  const sub = planner ? (thinking ? 'thinking…' : 'finds times, books plans, reminds everyone')
+  const sub = planner ? (thinking ? (draft ? 'writing…' : 'thinking…') : 'ask me anything, I plan too')
     : typing ? `${conv.is_group ? `${typing.display_name.split(' ')[0]} is ` : ''}typing…`
     : conv.is_group ? others.map((m) => m.display_name.split(' ')[0]).join(', ') + ', You'
     : lastSeen(others[0]);
@@ -632,6 +718,8 @@ export function ChatView({ convId: id }) {
   const starters = planner && userMsgs === 0 ? [
     f1 ? `Padel with ${f1} this weekend` : 'Braai this Saturday',
     'When is everyone free next week?',
+    'Ideas for a fun Friday night',
+    'Help me write a birthday message',
     'Remind me to book flights Monday 9am',
   ] : [];
   const lastAi = [...msgs].reverse().find((m) => !m.sender_id && m.kind !== 'system');
@@ -658,6 +746,29 @@ export function ChatView({ convId: id }) {
       <div className={`media-msg ${m.kind}`}>
         {who}{quote}
         <img src={m.kind === 'gif' ? gifUrl(m.data?.ref) : stickerUrl(m.data?.ref)} alt={m.body} draggable="false" />
+        {meta}
+      </div>
+    );
+    if (m.kind === 'image') {
+      const size = photoSize(m.data?.w, m.data?.h);
+      const src = m.local || mediaUrl(m.data?.url);
+      return (
+        <div className={`bubble photo ${m.body ? 'captioned' : ''}`}>
+          {who}{quote}
+          <button type="button" className="photo-frame" style={{ width: size.w, height: size.h }} onClick={clone || m.pending ? undefined : () => setViewer(m)} aria-label="Open photo">
+            {m.data?.thumb && <img className="photo-blur" src={m.data.thumb} alt="" draggable="false" />}
+            {src && <img className="photo-img" src={src} alt={m.body || 'Photo'} draggable="false" onLoad={(e) => e.currentTarget.classList.add('in')} />}
+            {m.pending && <span className="photo-progress" style={{ '--p': m.progress || 0 }}><i /></span>}
+            {!m.body && <span className="meta on-photo">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>}
+          </button>
+          {m.body && <><span className="text"><RichText text={m.body} /></span>{meta}</>}
+        </div>
+      );
+    }
+    if (m.kind === 'voice') return (
+      <div className="bubble voice-bubble">
+        {who}{quote}
+        <VoiceNote m={m} clone={clone} />
         {meta}
       </div>
     );
@@ -710,7 +821,9 @@ export function ChatView({ convId: id }) {
     { label: 'Delete', icon: 'trash', danger: true, run: () => remove(m) },
   ] : [
     { label: 'Reply', icon: 'reply', run: () => startReply(m) },
-    (m.kind === 'text' || m.kind === 'ai') && { label: 'Copy', icon: 'copy', run: () => copy(m) },
+    !planner && m.sender_id && { label: 'Ask Planner', icon: 'spark', run: () => askAbout(m) },
+    (m.kind === 'text' || m.kind === 'ai' || (m.kind === 'image' && m.body)) && { label: m.kind === 'image' ? 'Copy caption' : 'Copy', icon: 'copy', run: () => copy(m) },
+    m.kind === 'image' && m.data?.url && { label: 'Save photo', icon: 'download', run: () => { setMenu(null); savePhoto(m.data.url).catch(() => toast({ title: "Couldn't save the photo" })); } },
     m.sender_id === meId && { label: 'Delete for everyone', icon: 'trash', danger: true, confirm: 'Delete this message for everyone?', run: () => remove(m) },
   ].filter(Boolean));
 
@@ -736,7 +849,6 @@ export function ChatView({ convId: id }) {
       <div className="messages-wrap">
         <div className="messages wallpaper" ref={listRef} onScroll={onScroll}>
           {more && <div className="older">{older && <span className="spinner sm" />}</div>}
-          {planner && !more && <div className="info-pill">Tell Planner what you want to do and who with. It picks a time you're all free, books it and reminds everyone.</div>}
           {days.map(({ d, at, list }) => {
             let prev = null;
             return (
@@ -754,7 +866,14 @@ export function ChatView({ convId: id }) {
               </section>
             );
           })}
-          {(thinking || typing) && (
+          {draft ? (
+            <div className="row-msg in first">
+              <div className={`bubble streaming ${!planner ? 'ai' : ''}`}>
+                {!planner && <span className="who" style={{ color: 'var(--accent)' }}>Planner</span>}
+                <span className="text"><RichText text={draft} /><i className="caret" /></span>
+              </div>
+            </div>
+          ) : (thinking || typing) && (
             <div className="row-msg in first"><div className="bubble typing-bubble"><span /><span /><span /></div></div>
           )}
         </div>
@@ -775,17 +894,26 @@ export function ChatView({ convId: id }) {
           <button type="button" className="icon-plain sm" onClick={() => setReplyTo(null)} aria-label="Cancel reply"><Icon name="x" size={20} /></button>
         </div>
       )}
-      <form className="composer" onSubmit={send}>
-        {!planner && <button type="button" className="icon-plain" onClick={() => setAttach(true)} aria-label="More"><Icon name="plus" size={26} /></button>}
-        <div className="input-pill">
-          <input ref={inputRef} value={text} onChange={onType} enterKeyHint="send"
-            onKeyDown={(e) => e.key === 'Escape' && replyTo && setReplyTo(null)}
-            placeholder={replyTo ? 'Reply' : planner ? 'What should we plan?' : 'Message'} aria-label="Message" />
-          <button type="button" className="icon-plain sm muted-ic" onClick={() => setPicker(true)} aria-label="Emoji, stickers and GIFs"><Icon name="smile" size={24} /></button>
-          {!planner && <button type="button" className="icon-plain sm" onClick={planIt} disabled={thinking} aria-label="Plan it with Planner"><Orb size={24} state={thinking ? 'thinking' : 'idle'} /></button>}
-        </div>
-        <button className={`send ${text.trim() ? 'ready' : ''}`} disabled={!text.trim()} aria-label="Send"><Icon name="send" size={20} /></button>
+      <form className={`composer ${recording ? 'recording' : ''}`} onSubmit={send}>
+        {!planner && !recording && <button type="button" className="icon-plain" onClick={() => setAttach(true)} aria-label="More"><Icon name="plus" size={26} /></button>}
+        {recording ? <RecordingBar rec={rec} onCancel={() => rec.cancel()} /> : (
+          <div className="input-pill">
+            <input ref={inputRef} value={text} onChange={onType} enterKeyHint="send"
+              onKeyDown={(e) => e.key === 'Escape' && replyTo && setReplyTo(null)}
+              placeholder={replyTo ? 'Reply' : planner ? 'Ask me anything' : 'Message'} aria-label="Message" />
+            <button type="button" className="icon-plain sm muted-ic" onClick={() => setPicker(true)} aria-label="Emoji, stickers and GIFs"><Icon name="smile" size={24} /></button>
+            {!planner && !text.trim() && <button type="button" className="icon-plain sm muted-ic" onClick={pickPhotos} aria-label="Send a photo"><Icon name="camera" size={23} /></button>}
+            {!planner && <button type="button" className="icon-plain sm" onClick={text.trim() ? askPlanner : planIt} disabled={thinking && !text.trim()}
+              aria-label={text.trim() ? 'Ask Planner' : 'Plan it with Planner'}><Orb size={24} state={thinking ? 'thinking' : 'idle'} /></button>}
+          </div>
+        )}
+        {recording ? <button type="button" className="send ready" onClick={sendVoice} aria-label="Send voice message"><Icon name="send" size={20} /></button>
+          : voiceOk && !text.trim() ? <button type="button" className="send mic" onClick={startVoice} aria-label="Record a voice message"><Icon name="mic" size={22} /></button>
+          : <button className={`send ${text.trim() ? 'ready' : ''}`} disabled={!text.trim()} aria-label="Send"><Icon name="send" size={20} /></button>}
       </form>
+      <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={onPicked} />
+      {photos && <PhotoSend files={photos} title={planner ? 'Planner' : conv.title} onClose={() => setPhotos(null)} onSend={sendPhotos} />}
+      {viewer && <PhotoViewer m={viewer} who={viewer.sender_id === meId ? 'You' : viewer.sender?.display_name || ''} onClose={() => setViewer(null)} toast={toast} />}
 
       {menuMsg && menuMsg.kind !== 'deleted' && (
         <MessageMenu at={menu.at} side={menu.side} canReact={!menuMsg.failed} reactions={menuMsg.reactions} meId={meId}
@@ -796,12 +924,13 @@ export function ChatView({ convId: id }) {
       <ArtPicker open={picker} onClose={() => setPicker(false)} onEmoji={addEmoji} onSend={sendArt} />
       <Sheet open={attach} onClose={() => setAttach(false)}>
         <div className="attach-grid">
+          <button onClick={pickPhotos}><span style={{ '--c': 'var(--blue)' }}><Icon name="image" size={26} /></span>Photos</button>
           <button onClick={planIt}><span className="ai-tile"><Orb size={30} /></span>Plan it</button>
           <button onClick={() => { setAttach(false); navigate(`/plans/new?with=${others.map((o) => o.id).join(',')}`); }}><span style={{ '--c': 'var(--violet)' }}><Icon name="cal" size={26} /></span>New plan</button>
           <button onClick={() => { setAttach(false); callAll(); }}><span style={{ '--c': 'var(--ok)' }}><Icon name="video" size={26} /></span>Video call</button>
           <button onClick={chill}><span style={{ '--c': 'var(--pink)' }}><Icon name="coffee" size={26} /></span>Chill invite</button>
         </div>
-        <p className="muted small center">Tip: type @ai in a message to ask Planner right here.</p>
+        <p className="muted small center">Tip: start a message with @Planner, or type it and tap the orb, to ask Planner anything right here.</p>
       </Sheet>
     </div>
   );

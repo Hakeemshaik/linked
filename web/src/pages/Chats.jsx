@@ -6,6 +6,7 @@ import { fmtTime, dayKey, addDays } from '../lib/dates.js';
 import { shareInvite } from '../lib/share.js';
 import RichText from '../components/RichText.jsx';
 import SetupCard from '../components/SetupCard.jsx';
+import { clock } from '../components/Voice.jsx';
 
 function when(iso) {
   if (!iso) return '';
@@ -17,7 +18,7 @@ function when(iso) {
 }
 
 export default function Chats() {
-  const { me, friends, navigate, toast, unread } = useApp();
+  const { me, friends, navigate, toast, unread, openPlanner } = useApp();
   const [convs, setConvs] = useState(null);
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState('all');
@@ -74,7 +75,9 @@ export default function Chats() {
         {mine && <Icon name={read || others.some((u) => u.online) ? 'ticks' : 'tick'} size={16} className={`tick ${read ? 'read' : ''}`} />}
         {!mine && !!c.is_group && m.sender && <span>{m.sender.display_name.split(' ')[0]}: </span>}
         {!m.sender && m.kind === 'ai' && <span>Planner: </span>}
-        <span><RichText text={body} /></span>
+        {m.kind === 'image' ? <span className="media-line"><Icon name="camera" size={15} />{m.body ? <RichText text={m.body} /> : 'Photo'}</span>
+          : m.kind === 'voice' ? <span className="media-line"><Icon name="mic" size={15} />Voice message ({clock(m.data?.duration)})</span>
+          : <span><RichText text={body} /></span>}
       </>
     );
   };
@@ -90,7 +93,7 @@ export default function Chats() {
       <SetupCard />
       <label className="search">
         <Icon name="search" size={18} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search" aria-label="Search chats" />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search, or ask Planner" aria-label="Search chats, or ask Planner" />
       </label>
       <div className="filters">
         {[['all', 'All'], ['unread', 'Unread'], ['groups', 'Groups']].map(([k, l]) => (
@@ -106,6 +109,13 @@ export default function Chats() {
         </button>
       )}
 
+      {q.trim() && (
+        <button className="row-item ask-row" onClick={() => openPlanner(q.trim(), { send: true })}>
+          <Orb size={44} />
+          <span className="grow"><b>Ask Planner</b><small className="ellipsis">"{q.trim()}"</small></span>
+          <Icon name="right" size={18} className="muted" />
+        </button>
+      )}
       <div className="chat-list">
         {ai && filter === 'all' && !q && (
           <button className="row-item enter" style={{ '--i': 0 }} onClick={() => navigate(`/chat/${ai.id}`)}>
@@ -135,7 +145,7 @@ export default function Chats() {
 
       {convs && list.length === 0 && (filter !== 'all' || q) && <p className="muted center small mt">No chats match.</p>}
       {convs && list.length === 0 && filter === 'all' && !q && (
-        <Empty title={friends.friends.length ? 'No chats yet' : 'Bring your friends'}
+        <Empty art={friends.friends.length ? 'chats' : 'friends'} title={friends.friends.length ? 'No chats yet' : 'Bring your friends'}
           action={friends.friends.length
             ? <button className="btn primary mt" onClick={() => setNewOpen(true)}>Start a chat</button>
             : <button className="btn primary mt" onClick={() => shareInvite(me, toast)}>Share invite link</button>}>

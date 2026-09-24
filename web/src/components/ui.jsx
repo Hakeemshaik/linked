@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AVATARS, avatarUrl } from '../lib/art.js';
+import { AVATARS, avatarUrl, sceneUrl } from '../lib/art.js';
 import { NavLink, useLocation } from 'react-router-dom';
 import { STATUS, useApp } from '../lib/store.jsx';
 
@@ -45,6 +45,11 @@ const P = {
   copy: <><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.5" /><path d="M15.5 8.5V6.5A2.5 2.5 0 0 0 13 4H6.5A2.5 2.5 0 0 0 4 6.5V13a2.5 2.5 0 0 0 2.5 2.5h2" /></>,
   trash: <><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l.9 11.6A2 2 0 0 0 9.4 20.5h5.2a2 2 0 0 0 2-1.9L17.5 7M10 11v5.5M14 11v5.5" /></>,
   alert: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.8v4.9M12 16.2h.01" /></>,
+  camera: <><path d="M3.5 8.8A2.5 2.5 0 0 1 6 6.3h1.9l1.6-2.1h5l1.6 2.1H18a2.5 2.5 0 0 1 2.5 2.5V17A2.5 2.5 0 0 1 18 19.5H6A2.5 2.5 0 0 1 3.5 17Z" /><circle cx="12" cy="12.6" r="3.6" /></>,
+  image: <><rect x="3.5" y="4.5" width="17" height="15" rx="3" /><circle cx="9" cy="10" r="1.8" /><path d="m4 17.5 5-4.5 3.5 3 3-2.5 4.5 4" /></>,
+  download: <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14" />,
+  play: <path d="M8.5 5.8v12.4a.8.8 0 0 0 1.2.7l9.6-6.2a.8.8 0 0 0 0-1.4L9.7 5.1a.8.8 0 0 0-1.2.7Z" fill="currentColor" />,
+  pause: <><rect x="6.5" y="5" width="4" height="14" rx="1.3" fill="currentColor" /><rect x="13.5" y="5" width="4" height="14" rx="1.3" fill="currentColor" /></>,
   share: <><path d="M12 14V3.5M8 7.5l4-4 4 4" /><path d="M8.5 10H7a2.5 2.5 0 0 0-2.5 2.5V18A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5v-5.5A2.5 2.5 0 0 0 17 10h-1.5" /></>,
 };
 export function Icon({ name, size = 22, className = '' }) {
@@ -140,9 +145,10 @@ export function Toasts() {
   );
 }
 
-export function Empty({ title, children, action }) {
+export function Empty({ title, children, action, art }) {
   return (
     <div className="empty">
+      {art && <img className="empty-art" src={sceneUrl(art)} alt="" draggable="false" />}
       <strong>{title}</strong>
       {children && <p>{children}</p>}
       {action}

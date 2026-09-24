@@ -74,7 +74,7 @@ export default function Friends() {
       )}
 
       {friends.friends.length === 0 && friends.incoming.length === 0 && (
-        <Empty title="No friends yet" action={<button className="btn primary mt" onClick={share}>Share invite link</button>}>
+        <Empty art="friends" title="No friends yet" action={<button className="btn primary mt" onClick={share}>Share invite link</button>}>
           Send them your invite link. When they sign up with it you're connected straight away.
         </Empty>
       )}

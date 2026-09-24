@@ -27,6 +27,8 @@ app.use('/api', (req, res, next) => {
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use('/api', (err, req, res, _next) => {
+  if (err.status === 413) return res.status(413).json({ error: 'That file is too big to send' });
+  if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.expose ? err.message : 'Bad request' });
   console.error('[api]', err);
   res.status(500).json({ error: err.expose ? err.message : 'Something went wrong. Open /api/health to check the setup.' });
 });

@@ -53,6 +53,7 @@ self.addEventListener('push', (event) => {
   const options = {
     body: p.body || '',
     icon: p.icon || '/icons/icon-192.png',
+    ...(p.image ? { image: p.image } : {}),
     badge: '/icons/badge-96.png',
     tag: p.tag || p.id,
     renotify: true,

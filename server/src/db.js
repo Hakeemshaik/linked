@@ -10,7 +10,7 @@ export const DATA_DIR = process.env.DATA_DIR || path.join(SERVER_DIR, 'data');
 export const dbKind = URL ? 'postgres' : 'local';
 
 const NOW = `(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`;
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
@@ -164,6 +164,16 @@ CREATE TABLE IF NOT EXISTS reactions (
   emoji TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (message_id, user_id, emoji)
+);
+-- v5: photos and voice messages. The phone shrinks them before upload; they're served from /api/media/<id>.
+CREATE TABLE IF NOT EXISTS media (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  data BYTEA NOT NULL,
+  created_at TEXT NOT NULL
 );
 `;
 

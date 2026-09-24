@@ -122,3 +122,62 @@ export const GIFS = [
     return gifFrame(['#E8E4FA', '#C9C0EE'], place(character(CAST.boo, { eyes: 'closed', mouth: 'o' }), 22, 22 + bob, 0.92, -6) + [0, 1, 2].map(z).join(''));
   } },
 ];
+
+// ---------------- scenes: animated illustrations for empty screens and the welcome screen ----------------
+// Plain SVG with CSS animation inside, so they move even as an <img>. Moving parts are wrapper <g>s with no
+// transform attribute of their own (a CSS transform would replace it); transform-origin is in the local units.
+const MOTION = `.bob{animation:bob 2.6s ease-in-out infinite}.bob2{animation:bob 2.6s ease-in-out -1.3s infinite}
+.waveR{animation:waveR 1.4s ease-in-out infinite}.waveL{animation:waveL 1.4s ease-in-out -.7s infinite}
+.float{animation:float 3.2s ease-out infinite;opacity:0}.twinkle{animation:twinkle 1.8s ease-in-out infinite}
+.dot{animation:dot 1.2s ease-in-out infinite}.ring{animation:ring 1.6s ease-out infinite;opacity:0}
+.hop{animation:hop 1.6s cubic-bezier(.3,.7,.4,1) infinite}.pulse{animation:pulse 1.6s ease-in-out infinite}
+@keyframes bob{50%{transform:translateY(-4px)}}
+@keyframes waveR{0%,100%{transform:rotate(0)}50%{transform:rotate(26deg)}}
+@keyframes waveL{0%,100%{transform:rotate(0)}50%{transform:rotate(-26deg)}}
+@keyframes float{0%{opacity:0;transform:translate(0,0) scale(.6)}20%{opacity:1}100%{opacity:0;transform:translate(8px,-34px) scale(1.1)}}
+@keyframes twinkle{0%,100%{opacity:.25;transform:scale(.7)}50%{opacity:1;transform:scale(1.1)}}
+@keyframes dot{0%,60%,100%{transform:translateY(0);opacity:.45}30%{transform:translateY(-5px);opacity:1}}
+@keyframes ring{0%{opacity:.9;transform:scale(.6)}100%{opacity:0;transform:scale(1.5)}}
+@keyframes hop{0%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(0)}}
+@keyframes pulse{50%{transform:scale(1.12)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;opacity:1!important}}`;
+const scene = (w, h, body) => svg(w, h, `<style>${MOTION}</style>${body}`);
+const at = (x, y, s, inner, cls = '') => `<g transform="translate(${x} ${y}) scale(${s})"><g class="${cls}">${inner}</g></g>`;
+// Animated bits placed with a translate, then animated around their own origin.
+const bit = (x, y, cls, inner, delay = 0, origin = '0px 0px') =>
+  `<g transform="translate(${x} ${y})"><g class="${cls}" style="animation-delay:${delay}s;transform-origin:${origin}">${inner}</g></g>`;
+const star = (r, fill) => sparkle(0, 0, r, fill);
+// A raised arm waving outwards: the right one (x 82) or the left one (x 18), pivoting at the shoulder.
+const waveArm = (c, side = 'R') => side === 'R'
+  ? `<g class="waveR" style="transform-origin:82px 60px">${arm(c, 82, 60, 222, 25)}</g>`
+  : `<g class="waveL" style="transform-origin:18px 60px">${arm(c, 18, 60, 138, 25)}</g>`;
+const ground = (w, y, fill = '#000') => `<ellipse cx="${w / 2}" cy="${y}" rx="${w * 0.36}" ry="7" fill="${fill}" opacity=".07"/>`;
+
+export const SCENES = [
+  { id: 'chats', svg: () => scene(240, 150, ground(240, 140)
+    + at(26, 44, 0.95, character(CAST.bo, { mouth: 'open', behind: arm(CAST.bo, 22, 62, 35) + waveArm(CAST.bo) }), 'bob')
+    + at(118, 50, 0.9, character(CAST.mochi, { eyes: 'happy', mouth: 'cat', behind: arm(CAST.mochi, 22, 62, 40) + arm(CAST.mochi, 78, 62, -40) }), 'bob2')
+    + `<g transform="translate(84 6)"><path d="M0 14 Q0 0 14 0 H58 Q72 0 72 14 V22 Q72 36 58 36 H26 L14 46 L16 36 H14 Q0 36 0 22 Z" fill="#fff" stroke="${INK}" stroke-width="2.5" stroke-linejoin="round"/>`
+    + [0, 1, 2].map((i) => `<g transform="translate(${22 + i * 14} 18)"><circle class="dot" style="animation-delay:${i * 0.15}s" r="4.2" fill="#8F78FF"/></g>`).join('') + '</g>'
+    + bit(206, 70, 'float', heart('#FF5C8A', 0.2, 0, 0), 0.4) + bit(196, 86, 'float', heart('#FF9ACB', 0.14, 0, 0), 1.8)) },
+  { id: 'calls', svg: () => scene(240, 150, ground(240, 140)
+    + [0, 0.55, 1.1].map((d) => `<g transform="translate(162 52)"><circle class="ring" style="animation-delay:${d}s;transform-origin:0 0" r="24" fill="none" stroke="#3FC3A0" stroke-width="3"/></g>`).join('')
+    + at(66, 38, 1, character(CAST.lulu, { eyes: 'happy', mouth: 'open', front: `<g transform="rotate(-18 80 54)"><rect x="72" y="36" width="18" height="32" rx="5" fill="${INK}"/><rect x="74.5" y="40" width="13" height="22" rx="2" fill="#8FE0FF"/></g>` + arm(CAST.lulu, 74, 66, 205, 18) }), 'bob')
+    + bit(40, 40, 'twinkle', star(6, '#FFD84A'), 0.3, '0px 0px') + bit(206, 104, 'twinkle', star(5, '#FF9ACB'), 1, '0px 0px')) },
+  { id: 'plans', svg: () => scene(240, 150, ground(240, 140)
+    + `<g transform="translate(128 34) rotate(8)"><rect x="0" y="8" width="78" height="72" rx="13" fill="#fff" stroke="${INK}" stroke-width="3"/><path d="M0 24 Q0 8 16 8 H62 Q78 8 78 24 V30 H0 Z" fill="#FF5C7A" stroke="${INK}" stroke-width="3" stroke-linejoin="round"/><path d="M20 0 V16 M58 0 V16" stroke="${INK}" stroke-width="5" stroke-linecap="round"/>`
+    + `<g transform="translate(39 55)"><g class="pulse"><path d="M-15 0 L-4 11 L17 -11" stroke="#22C065" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g></g></g>`
+    + at(20, 40, 0.98, character(CAST.pip, { eyes: 'happy', behind: arm(CAST.pip, 20, 60, 150) + arm(CAST.pip, 80, 60, 210) + legs(CAST.pip, 0) }), 'hop')
+    + bit(118, 26, 'twinkle', star(7, '#FFD84A'), 0) + bit(222, 118, 'twinkle', star(5, '#8F78FF'), 0.9) + bit(26, 28, 'twinkle', star(4.5, '#FF9ACB'), 0.5)) },
+  { id: 'alerts', svg: () => scene(240, 150, ground(240, 140)
+    + `<g transform="translate(120 72)"><ellipse rx="70" ry="10" cy="58" fill="#8F78FF" opacity=".12"/></g>`
+    + at(62, 36, 1.05, character(CAST.boo, { eyes: 'closed', mouth: 'o' }), 'bob')
+    + [0, 1.05, 2.1].map((d, i) => bit(158 + i * 6, 52 - i * 4, 'float', `<path d="M0 0 H12 L0 14 H12" transform="scale(${1 - i * 0.18})" stroke="#8F78FF" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`, d)).join('')) },
+  { id: 'friends', svg: () => scene(240, 150, ground(240, 140)
+    + at(24, 42, 0.95, character(CAST.hop, { mouth: 'open', behind: arm(CAST.hop, 22, 62, 35) + waveArm(CAST.hop) }), 'bob')
+    + at(120, 42, 0.95, character(CAST.kit, { eyes: 'happy', mouth: 'open', behind: waveArm(CAST.kit, 'L') + arm(CAST.kit, 78, 62, -35) }), 'bob2')
+    + bit(118, 30, 'float', heart('#FF5C8A', 0.2, 0, 0), 0.2) + bit(128, 36, 'float', heart('#B89BFF', 0.14, 0, 0), 1.7)
+    + bit(22, 32, 'twinkle', star(5, '#FFD84A'), 0.6) + bit(220, 40, 'twinkle', star(6, '#FFD84A'), 1.2)) },
+  { id: 'hello', svg: () => scene(376, 100, [['kit', { eyes: 'happy', mouth: 'open' }], ['bo', { mouth: 'open', behind: arm(CAST.bo, 22, 62, 35) + waveArm(CAST.bo) }], ['lulu', { eyes: 'wink', mouth: 'open' }], ['pip', {}], ['zib', { mouth: 'open' }], ['honey', { eyes: 'happy' }]]
+    .map(([id, o], i) => `<g transform="translate(${6 + i * 62} 24) scale(.58)"><g class="hop" style="animation-delay:${i * 0.16}s">${character(CAST[id], o)}</g></g>`).join('')) },
+];

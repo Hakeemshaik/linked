@@ -29,10 +29,11 @@ export function AppProvider({ children, navigate }) {
   const aiRef = useRef(null);
   aiRef.current = aiConvId;
   // Planner is a pinned chat. Open it, optionally with text ready to send.
-  const openPlanner = useCallback(async (draft = '') => {
+  // Open the Planner chat with text ready to send, or ({ send: true }) sent straight away.
+  const openPlanner = useCallback(async (draft = '', { send = false } = {}) => {
     let cid = aiRef.current;
     if (!cid) { const r = await get('/conversations'); cid = r.conversations.find((c) => c.is_ai)?.id; setAiConvId(cid); }
-    if (cid) navRef.current(`/chat/${cid}${draft ? `?draft=${encodeURIComponent(draft)}` : ''}`);
+    if (cid) navRef.current(`/chat/${cid}${draft ? `?${send ? 'ask' : 'draft'}=${encodeURIComponent(draft)}` : ''}`);
   }, []);
   const rtRef = useRef(null);
   const [rt, setRt] = useState(null);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { get, post } from '../lib/api.js';
 import { useApp } from '../lib/store.jsx';
 import { Orb, Avatar, Icon } from '../components/ui.jsx';
+import { sceneUrl } from '../lib/art.js';
 
 const inviteFromPath = () => (location.pathname.match(/^\/join\/([^/]+)/) || [])[1] || null;
 
@@ -59,12 +60,13 @@ export default function Login() {
 
       {step === 'welcome' ? (
         <div className="welcome-actions">
+          <img className="hello-cast" src={sceneUrl('hello')} alt="" draggable="false" />
           <button className="btn primary block big-btn" onClick={() => setStep('register')}>Create account</button>
           <button className="btn quiet block" onClick={() => setStep('login')}>I already have an account</button>
           <ul className="perks">
-            <li><Icon name="chat" size={18} />Chat and video call your friends</li>
+            <li><Icon name="chat" size={18} />Chat, send photos and voice notes, video call</li>
             <li><Icon name="cal" size={18} />See who's free and plan together</li>
-            <li><Icon name="bell" size={18} />Planner books it and reminds everyone</li>
+            <li><Icon name="spark" size={18} />Ask Planner anything. It books plans and reminds everyone</li>
           </ul>
         </div>
       ) : (

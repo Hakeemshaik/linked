@@ -14,9 +14,14 @@ export const aiMisconfigured = !!process.env.VERCEL && /^https?:\/\/(localhost|1
 // Sent on every call: ngrok's free tunnels show a warning page unless asked not to.
 export const aiHeaders = { Authorization: `Bearer ${KEY}`, 'ngrok-skip-browser-warning': '1' };
 
-async function chat(messages) {
+/**
+ * One call to the model. json: ask for a JSON object (plan extraction). stream + onText: get the reply
+ * as it's written, for servers that stream (LM Studio, Ollama); others just answer at the end.
+ */
+async function chat(messages, { json = false, stream = false, temperature = 0.2, onText } = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT);
+  const useJson = () => json && jsonMode;
   const send = () => fetch(`${BASE}/chat/completions`, {
     method: 'POST',
     signal: ctrl.signal,
@@ -24,22 +29,48 @@ async function chat(messages) {
     body: JSON.stringify({
       model: MODEL,
       messages,
-      temperature: 0.2,
-      stream: false,
-      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      temperature,
+      stream,
+      ...(useJson() ? { response_format: { type: 'json_object' } } : {}),
     }),
   });
   try {
     let res = await send();
     // Some servers (LM Studio) reject JSON mode. The prompt already asks for JSON, so retry without it.
-    if (res.status === 400 && jsonMode) {
+    if (res.status === 400 && useJson()) {
       const text = await res.text();
       if (/response_format|json/i.test(text)) { jsonMode = false; res = await send(); }
       else throw Object.assign(new Error(`HTTP 400: ${text.slice(0, 160)}`), { kind: 'http' });
     }
     if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`), { kind: 'http' });
-    const j = await res.json();
-    return j.choices?.[0]?.message?.content || '';
+    if (!stream || !/event-stream/.test(res.headers.get('content-type') || '')) {
+      const j = await res.json();
+      return j.choices?.[0]?.message?.content || '';
+    }
+    // Server-sent events: "data: {choices:[{delta:{content}}]}" lines, then "data: [DONE]".
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let text = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const c = JSON.parse(data).choices?.[0];
+          const piece = c?.delta?.content ?? c?.message?.content ?? '';
+          if (piece) { text += piece; onText?.(text); }
+        } catch { /* a keep-alive or partial line */ }
+      }
+    }
+    return text;
   } finally {
     clearTimeout(t);
   }
@@ -154,7 +185,7 @@ ${convId ? `\nChat so far:\n${(await transcript(convId)) || '(empty)'}` : ''}`;
   const raw = await chat([
     { role: 'system', content: SYSTEM },
     { role: 'user', content: `${context}\n\n${ask}` },
-  ]);
+  ], { json: true });
   const parsed = extractJSON(raw);
   if (!parsed) return { reply: raw.trim().slice(0, 1000) || "I couldn't work that out, try again?", plan: null };
   const solo = mode === 'schedule' || personal;
@@ -162,6 +193,143 @@ ${convId ? `\nChat so far:\n${(await transcript(convId)) || '(empty)'}` : ''}`;
   return {
     reply: String(parsed.reply || '').slice(0, 1000),
     plan: parsed.plan ? await normalizePlan(parsed.plan, members, { defaultIds, requesterId: solo ? requesterId : null, from: searchFromHint(instruction) }) : null,
+  };
+}
+
+// ---------------- conversation: Planner as a friend in the chat ----------------
+
+const PERSONA = `You are Planner, the assistant inside Linkup, a messenger for a small group of friends (time zone ${TZ}).
+You're warm, relaxed and quick, like the clever friend in the group chat. Talk naturally, in plain words.
+Keep it short: usually one to three sentences. Go longer only when someone asks for detail, steps or a list.
+You can talk about anything and answer any question: ideas, recommendations, facts, advice, maths, writing, jokes.
+You also help the friends plan, using their calendars below.
+
+Rules:
+- For who is free and what's booked, only use the schedules and events listed below. Never invent plans, times or people.
+- If you're not sure of a fact, say so briefly instead of guessing.
+- Plain text only: no markdown, headings or tables. A short list with "- " is fine when it helps.
+- No emoji characters. If it fits, you may use one of the app's own emoji codes: :love: :lol: :hype: :cheers: :party: :omw: :braai: :free: :meh: :sleepy:
+- Refer to people by first name. Don't start with "As an AI".
+- When someone clearly asks you to book, plan, schedule or remind them of something, say in one line what you're setting up, then put this at the very end:
+<plan>{"title":"short title","type":"trip|hangout|meeting|call|event","date":"YYYY-MM-DD","end_date":null,"start_time":"HH:MM or null","end_time":"HH:MM or null","location":"","notes":"","participants":["username"],"reminder_minutes":60}</plan>
+  Only add it when they ask for something to be booked or reminded. Never mention it or show JSON otherwise.
+  Resolve dates from the calendar, pick times when those people are free ("after work" means 17:30 or later), and a reminder (calls 15, hangouts 60, meetings 30, trips 1440).`;
+
+/** Who's in the conversation and what their next three weeks look like. */
+async function contextFor(members, requester, personal) {
+  const days = nextDays(21);
+  const nowStr = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(new Date());
+  return `Now: ${nowStr} (${TZ}).
+Calendar (next 21 days):
+${days.map((d) => `${d.date} = ${d.label}`).join('\n')}
+
+${personal ? `You're talking with ${requester?.display_name} (username: ${requester?.username}) in their private chat with you. Their friends:` : 'People in this chat:'}
+${members.map((m) => `- ${m.display_name} (username: ${m.username})`).join('\n')}
+
+Schedules (busy / work blocks and events already booked):
+${await scheduleContext(members, days)}`;
+}
+
+const MEDIA_TEXT = { image: '[a photo]', voice: '[a voice message]', sticker: '[a sticker]', gif: '[a GIF]' };
+
+/** The recent chat as turns the model remembers: people are "user", Planner is "assistant". */
+async function historyTurns(convId, { personal, skipId, limit = 18 }) {
+  const rows = (await q('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?', [convId, limit + 1]))
+    .filter((m) => m.id !== skipId).slice(0, limit).reverse();
+  const names = new Map((await getUsers(rows.map((m) => m.sender_id).filter(Boolean))).map((u) => [u.id, u.display_name.split(' ')[0]]));
+  const turns = [];
+  for (const m of rows) {
+    if (m.kind === 'system' || m.kind === 'deleted') continue;
+    let data = {};
+    try { data = m.data ? JSON.parse(m.data) : {}; } catch { /* ignore */ }
+    if (!m.sender_id) {
+      const p = data.plan;
+      turns.push({ role: 'assistant', content: m.kind === 'plan' ? `[I suggested a plan: ${p?.title || m.body}${p?.start_at ? `, ${dateKey(p.start_at)} ${timeKey(p.start_at)}` : ''}${data.status === 'created' ? ', now booked' : ''}]` : m.body });
+      continue;
+    }
+    const text = [MEDIA_TEXT[m.kind], m.body && !MEDIA_TEXT[m.kind] ? m.body : m.kind === 'image' ? m.body : ''].filter(Boolean).join(' ').slice(0, 600);
+    turns.push({ role: 'user', content: personal ? text : `${names.get(m.sender_id) || 'Someone'}: ${text}` });
+  }
+  return turns;
+}
+
+/** Many chat templates need user/assistant turns to alternate, starting with the user. */
+function alternate(turns) {
+  const out = [];
+  for (const t of turns) {
+    const last = out[out.length - 1];
+    if (last && last.role === t.role) last.content += `\n${t.content}`;
+    else out.push({ ...t });
+  }
+  while (out[0]?.role === 'assistant') out.shift();
+  return out;
+}
+
+// Hide reasoning ("<think>") and the plan block while the reply streams in.
+export function visibleText(t = '') {
+  let v = t.replace(/<think>[\s\S]*?(<\/think>|$)/gi, '');
+  const cut = v.search(/<plan\b/i);
+  if (cut >= 0) v = v.slice(0, cut);
+  const lt = v.lastIndexOf('<');
+  const tail = lt >= 0 ? v.slice(lt).toLowerCase() : '';
+  if (tail && !tail.includes('>') && ['<plan', '<think'].some((tag) => tag.startsWith(tail))) v = v.slice(0, lt); // a tag still arriving
+  if (v.trimStart().startsWith('{')) return ''; // the model went JSON; wait for the end
+  return v.trim();
+}
+
+const TO_CODE = [[/[\u{1F49C}❤\u{1F496}\u{1F497}\u{1F60D}\u{1F970}]️?/gu, ':love:'], [/[\u{1F602}\u{1F923}\u{1F606}]/gu, ':lol:'], [/\u{1F525}/gu, ':hype:'],
+  [/[\u{1F37B}\u{1F942}\u{1F37A}]/gu, ':cheers:'], [/[\u{1F389}\u{1F973}\u{1F38A}]/gu, ':party:'], [/[\u{1F634}\u{1F4A4}]/gu, ':sleepy:'], [/\u{1F612}/gu, ':meh:'], [/\u{1F3C3}/gu, ':omw:'], [/[✅✔]️?/gu, ':free:']];
+const APP_CODES = new Set(['love', 'lol', 'hype', 'omw', 'braai', 'cheers', 'free', 'meh', 'sleepy', 'party']);
+/** The app draws its own emoji, so common ones become its codes and the rest are dropped; markdown goes too. */
+export function cleanReply(t = '') {
+  let v = t.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  for (const [re, code] of TO_CODE) v = v.replace(re, code);
+  v = v.replace(/\p{Extended_Pictographic}️?/gu, '').replace(/:([a-z]+):/g, (m, id) => (APP_CODES.has(id) ? m : ''));
+  v = v.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1').replace(/^#{1,6}\s+/gm, '').replace(/^\s*[*•]\s+/gm, '- ');
+  return v.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 2500);
+}
+
+/** The reply text and the plan block (if any), from what the model wrote. */
+export function parseReply(raw = '') {
+  let t = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  const m = t.match(/<plan>\s*([\s\S]*?)\s*(<\/plan>|$)/i);
+  if (m) return { reply: t.slice(0, m.index).trim(), plan: extractJSON(m[1]) };
+  if (t.startsWith('{') || t.startsWith('```')) {
+    const j = extractJSON(t);
+    if (j && typeof j === 'object' && ('reply' in j || 'plan' in j)) return { reply: String(j.reply || ''), plan: j.plan || null };
+  }
+  return { reply: t, plan: null };
+}
+
+/**
+ * Planner answers a message in the chat, remembering the conversation. onText(visible) is called as the
+ * reply is written. trigger = the message it's answering (and trigger.quoted, what that message replied to).
+ */
+export async function converse(convId, { requesterId, instruction = '', trigger = null, memberIdsOverride, personal = false, onText } = {}) {
+  const ids = memberIdsOverride || (await memberIds(convId));
+  const byId = new Map((await getUsers(ids)).map((u) => [u.id, u]));
+  const members = ids.map((x) => byId.get(x)).filter(Boolean);
+  const requester = byId.get(requesterId) || (await getUser(requesterId));
+  const first = (requester?.display_name || 'Someone').split(' ')[0];
+  const history = await historyTurns(convId, { personal, skipId: trigger?.id });
+  const quoted = trigger?.quoted ? ` (replying to ${trigger.quoted.sender_name || 'someone'}: "${String(trigger.quoted.body || MEDIA_TEXT[trigger.quoted.kind] || '').slice(0, 300)}")` : '';
+  const ask = personal ? `${instruction}${quoted}` : `${first} asks you${quoted}: ${instruction}`;
+  const messages = [
+    { role: 'system', content: `${PERSONA}\n\n${await contextFor(members, requester, personal)}` },
+    ...alternate([...history, { role: 'user', content: ask || '(no text)' }]),
+  ];
+  let last = '';
+  const raw = await chat(messages, {
+    stream: true, temperature: 0.7,
+    onText: (t) => { const v = visibleText(t); if (v && v !== last) { last = v; onText?.(cleanReply(v)); } },
+  });
+  const { reply, plan } = parseReply(raw);
+  const solo = personal;
+  return {
+    reply: cleanReply(reply),
+    plan: plan && typeof plan === 'object' ? await normalizePlan(plan, members, { defaultIds: solo ? [requesterId] : null, requesterId: solo ? requesterId : null, from: searchFromHint(instruction) }) : null,
   };
 }
 
