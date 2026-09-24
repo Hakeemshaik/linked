@@ -7,6 +7,7 @@ import { shareInvite } from '../lib/share.js';
 import RichText from '../components/RichText.jsx';
 import SetupCard from '../components/SetupCard.jsx';
 import { clock } from '../components/Voice.jsx';
+import { cached, cache } from '../lib/cache.js';
 
 function when(iso) {
   if (!iso) return '';
@@ -19,7 +20,7 @@ function when(iso) {
 
 export default function Chats() {
   const { me, friends, navigate, toast, unread, openPlanner } = useApp();
-  const [convs, setConvs] = useState(null);
+  const [convs, setConvs] = useState(() => cached('convs') || null); // last visit's list, shown at once
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState('all');
   const [typing, setTyping] = useState({});
@@ -29,7 +30,7 @@ export default function Chats() {
   const [name, setName] = useState('');
   const timers = useRef({});
 
-  const load = () => get('/conversations').then((r) => setConvs(r.conversations)).catch(() => setConvs([]));
+  const load = () => get('/conversations').then((r) => { setConvs(r.conversations); cache('convs', r.conversations); }).catch(() => setConvs((c) => c || []));
   useEffect(() => { load(); }, []);
   useSocket('message', load);
   useSocket('message:update', load);

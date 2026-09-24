@@ -9,6 +9,7 @@ import ArtPicker from '../components/ArtPicker.jsx';
 import RichText, { emojiOnly } from '../components/RichText.jsx';
 import { EMOJI, emojiUrl, stickerUrl, gifUrl } from '../lib/art.js';
 import { uploadMedia, mediaUrl, savePhoto } from '../lib/media.js';
+import { cachedMessages, cacheMessages } from '../lib/cache.js';
 import { PhotoSend, PhotoViewer, photoSize } from '../components/Photos.jsx';
 import { VoiceNote, RecordingBar, useRecorder, canRecord, clock } from '../components/Voice.jsx';
 
@@ -356,6 +357,12 @@ export function ChatView({ convId: id }) {
 
   useEffect(() => {
     let live = true;
+    // The last visit's messages show at once; the fresh copy replaces them a moment later.
+    const hit = cachedMessages(id);
+    if (hit?.conv) {
+      initialIds.current = new Set(hit.msgs.map((m) => m.id));
+      setConv(hit.conv); setMsgs(hit.msgs); setMore(hit.msgs.length >= 40);
+    }
     Promise.all([get(`/conversations/${id}`), get(`/conversations/${id}/messages`)]).then(async ([c, r]) => {
       // Where you left off: the first message that came in since you last read this chat.
       const myId = c.conversation.members.find((u) => u.me)?.id;
@@ -373,8 +380,12 @@ export function ChatView({ convId: id }) {
       // Only worth a line when there's earlier conversation above it.
       const above = firstNew && (r.more || r.messages.slice(0, r.messages.indexOf(firstNew)).some((m) => m.kind !== 'system'));
       unreadMark.current = above ? { id: firstNew.id, n: unread } : null;
-      initialIds.current = new Set(r.messages.map((m) => m.id));
-      setConv(c.conversation); setMsgs(r.messages); setMore(!!r.more);
+      if (unreadMark.current) placed.current = false; // open at the unread line, even if the cached copy showed first
+      initialIds.current = new Set([...(initialIds.current || []), ...r.messages.map((m) => m.id)]);
+      setConv(c.conversation);
+      // Keep anything you started sending in the meantime.
+      setMsgs((x) => [...r.messages, ...x.filter((m) => (m.pending || m.failed) && !r.messages.some((y) => y.id === m.id))]);
+      setMore(!!r.more);
       markRead();
     }).catch(() => live && navigate('/', { replace: true }));
     // Reading the chat clears its notifications from the lock screen.
@@ -458,14 +469,19 @@ export function ChatView({ convId: id }) {
     if (more && el.scrollTop < 400) loadOlder();
   };
 
-  /** Add a message, or swap in the server's copy of one we're already showing. */
+  /** Add a message, or swap in the server's copy of one we're already showing (by id, or by client_id for our own). */
   const upsert = (m) => setMsgs((x) => {
-    const i = x.findIndex((y) => y.id === m.id || (m.client_id && y.client_id === m.client_id));
-    if (i < 0) return [...x, m];
+    const byId = x.findIndex((y) => y.id === m.id);
+    const byCid = m.client_id ? x.findIndex((y) => y.client_id === m.client_id && y.id !== m.id) : -1;
+    const keep = x[byCid]?.local || x[byId]?.local; // keep showing the local copy of a photo or voice message
+    const merged = { ...m, client_id: x[byCid]?.client_id || x[byId]?.client_id || m.client_id, ...(keep ? { local: keep } : {}) };
+    if (byId < 0 && byCid < 0) return [...x, m];
     const next = x.slice();
-    next[i] = { ...m, client_id: x[i].client_id || m.client_id, ...(x[i].local ? { local: x[i].local } : {}) }; // keep showing the local copy
+    if (byId >= 0) { next[byId] = merged; if (byCid >= 0) next.splice(byCid, 1); }
+    else next[byCid] = merged;
     return next;
   });
+  useEffect(() => { if (conv && msgs.length) cacheMessages(id, conv, msgs); }, [msgs, conv]); // eslint-disable-line
 
   useSocket('message', (m) => {
     if (m.conversation_id !== id) return;

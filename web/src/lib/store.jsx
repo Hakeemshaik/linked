@@ -3,6 +3,7 @@ import { get, post, getToken, setToken } from './api.js';
 import { connectRealtime } from './realtime.js';
 import { unlockAudioOnTouch } from './sound.js';
 import { registerSW, syncPush } from './push.js';
+import { cacheFor, cached, cache, clearCache } from './cache.js';
 
 const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
@@ -18,9 +19,15 @@ export const STATUS = {
 
 export function AppProvider({ children, navigate }) {
   const [token, setTok] = useState(getToken());
-  const [me, setMe] = useState(null);
-  const [config, setConfig] = useState(null);
-  const [friends, setFriends] = useState({ friends: [], incoming: [], outgoing: [] });
+  // Shown from the last visit straight away, then refreshed.
+  const [me, setMeState] = useState(() => (getToken() ? cached('me') || null : null));
+  const setMe = useCallback((u) => setMeState((cur) => {
+    const next = typeof u === 'function' ? u(cur) : u;
+    if (next?.id) { cacheFor(next.id); cache('me', next); }
+    return next;
+  }), []);
+  const [config, setConfig] = useState(() => cached('config') || null);
+  const [friends, setFriends] = useState(() => (getToken() && cached('friends')) || { friends: [], incoming: [], outgoing: [] });
   const [unread, setUnread] = useState(0);
   const [chatUnread, setChatUnread] = useState(0);
   const [toasts, setToasts] = useState([]);
@@ -47,7 +54,7 @@ export function AppProvider({ children, navigate }) {
   }, []);
   const dismissToast = (tid) => setToasts((x) => x.filter((y) => y.tid !== tid));
 
-  const loadFriends = useCallback(() => get('/friends').then(setFriends).catch(() => {}), []);
+  const loadFriends = useCallback(() => get('/friends').then((f) => { setFriends(f); cache('friends', f); }).catch(() => {}), []);
   const loadUnread = useCallback(() => {
     get('/notifications').then((r) => setUnread(r.unread)).catch(() => {});
     get('/conversations').then((r) => { setChatUnread(r.conversations.reduce((a, c) => a + c.unread, 0)); setAiConvId(r.conversations.find((c) => c.is_ai)?.id || null); }).catch(() => {});
@@ -57,13 +64,13 @@ export function AppProvider({ children, navigate }) {
     setToken(t); setTok(t); setMe(user);
     if (!location.pathname.startsWith('/join/')) navRef.current('/', { replace: true });
   };
-  const logout = () => { post('/presence', { visible: false }, { keepalive: true }).catch(() => {}); setToken(null); setTok(null); setMe(null); navRef.current('/', { replace: true }); };
+  const logout = () => { post('/presence', { visible: false }, { keepalive: true }).catch(() => {}); clearCache(); setToken(null); setTok(null); setMe(null); navRef.current('/', { replace: true }); };
 
   useEffect(() => unlockAudioOnTouch(), []);
   useEffect(() => {
     registerSW();
-    get('/config').then(setConfig).catch(() => {});
-    const onLogout = () => { setTok(null); setMe(null); };
+    get('/config').then((c) => { setConfig(c); cache('config', c); }).catch(() => {});
+    const onLogout = () => { clearCache(); setTok(null); setMe(null); };
     window.addEventListener('linkup:logout', onLogout);
     const onSW = (e) => {
       if (e.data?.type === 'navigate') navRef.current(e.data.url);

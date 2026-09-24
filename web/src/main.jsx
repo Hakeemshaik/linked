@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useRef, useState } from 'react';
+import { StrictMode, Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, useNavigationType } from 'react-router-dom';
 import { AppProvider, useApp } from './lib/store.jsx';
@@ -10,17 +10,36 @@ import IncomingInvite from './components/IncomingInvite.jsx';
 import Login from './pages/Login.jsx';
 import Chats from './pages/Chats.jsx';
 import ChatRoom from './pages/ChatRoom.jsx';
-import Calendar from './pages/Calendar.jsx';
-import Calls from './pages/Calls.jsx';
-import Settings from './pages/Settings.jsx';
-import Friends from './pages/Friends.jsx';
-import Plans from './pages/Plans.jsx';
-import EventForm from './pages/EventForm.jsx';
-import EventPage from './pages/EventPage.jsx';
-import Alerts from './pages/Alerts.jsx';
-import Call from './pages/Call.jsx';
-import InvitePage from './pages/InvitePage.jsx';
 import './styles.css';
+import { pinViewport } from './lib/viewport.js';
+
+pinViewport();
+
+// Chats open straight away; other screens load on first use (and quietly in the background right after start).
+const screens = {
+  Calendar: () => import('./pages/Calendar.jsx'),
+  Calls: () => import('./pages/Calls.jsx'),
+  Settings: () => import('./pages/Settings.jsx'),
+  Friends: () => import('./pages/Friends.jsx'),
+  Plans: () => import('./pages/Plans.jsx'),
+  EventForm: () => import('./pages/EventForm.jsx'),
+  EventPage: () => import('./pages/EventPage.jsx'),
+  Alerts: () => import('./pages/Alerts.jsx'),
+  Call: () => import('./pages/Call.jsx'),
+  InvitePage: () => import('./pages/InvitePage.jsx'),
+};
+const Calendar = lazy(screens.Calendar);
+const Calls = lazy(screens.Calls);
+const Settings = lazy(screens.Settings);
+const Friends = lazy(screens.Friends);
+const Plans = lazy(screens.Plans);
+const EventForm = lazy(screens.EventForm);
+const EventPage = lazy(screens.EventPage);
+const Alerts = lazy(screens.Alerts);
+const Call = lazy(screens.Call);
+const InvitePage = lazy(screens.InvitePage);
+const warm = () => Object.values(screens).forEach((load) => load().catch(() => {}));
+(window.requestIdleCallback || ((f) => setTimeout(f, 1200)))(warm);
 
 const TAB_ROOTS = ['/', '/calendar', '/calls'];
 
@@ -30,7 +49,7 @@ function Splash() {
   useEffect(() => {
     if (!show) return;
     try { sessionStorage.setItem('linkup_splash', '1'); } catch { /* ignore */ }
-    const t = setTimeout(() => setShow(false), 1300);
+    const t = setTimeout(() => setShow(false), 700);
     return () => clearTimeout(t);
   }, [show]);
   if (!show) return null;
@@ -83,6 +102,7 @@ function Shell() {
     <div className={`app ${fullScreen ? 'fullscreen' : ''} ${showTabs ? 'with-tabs' : ''} ${pill ? 'island-on' : ''}`}>
       <Splash />
       <main className={`page ${anim}`} key={loc.pathname}>
+        <Suspense fallback={<div className="page-wait" />}>
         <Routes>
           <Route path="/" element={<Chats />} />
           <Route path="/chat" element={<Navigate to="/" replace />} />
@@ -102,9 +122,10 @@ function Shell() {
           <Route path="/join/:token" element={<div className="spinner" />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </Suspense>
       </main>
       {showTabs && <TabBar />}
-      {activeCall && <Call key={activeCall} room={activeCall} minimized={onCall !== activeCall} onClose={() => setActiveCall(null)} />}
+      {activeCall && <Suspense fallback={null}><Call key={activeCall} room={activeCall} minimized={onCall !== activeCall} onClose={() => setActiveCall(null)} /></Suspense>}
       <Toasts />
       <IncomingInvite />
       <UpdatePrompt />

@@ -1,4 +1,14 @@
-import { run, id } from './db.js';
+import { run, id, one, now } from './db.js';
+
+/** The number on the app icon: unread messages in chats you haven't muted, plus unread alerts. */
+export async function badgeFor(uid) {
+  const r = await one(`SELECT
+      (SELECT COUNT(*)::int FROM notifications WHERE user_id = ? AND read = 0) +
+      (SELECT COUNT(*)::int FROM conversation_members m JOIN messages x ON x.conversation_id = m.conversation_id
+         AND (x.sender_id IS NULL OR x.sender_id != m.user_id) AND x.kind != 'system' AND x.created_at > COALESCE(m.last_read_at, '')
+       WHERE m.user_id = ? AND (m.muted_until IS NULL OR m.muted_until < ?)) AS n`, [uid, uid, now()]);
+  return r?.n || 0;
+}
 import { emitToUser, visibleUserIds } from './realtime.js';
 import { sendPush } from './push.js';
 
@@ -34,7 +44,7 @@ export async function notify(userIds, opts) {
     const jobs = [emitToUser(uid, 'notification', n)];
     // If the app is on screen, the in-app toast/ring handles it. Otherwise send a real push with the actual content.
     if (!onScreen.has(uid)) {
-      jobs.push(sendPush(uid, {
+      jobs.push(badgeFor(uid).catch(() => null).then((badge) => sendPush(uid, {
         id: n.id,
         title: n.title,
         body: n.body,
@@ -48,7 +58,8 @@ export async function notify(userIds, opts) {
         image: opts.image, // a sent photo: Android shows it in the notification
         ttl: opts.ttl,
         timestamp: Date.now(),
-      }).catch((e) => console.warn('[push] error', e.message)));
+        badge,
+      })).catch((e) => console.warn('[push] error', e.message)));
     }
     await Promise.all(jobs);
     return n;

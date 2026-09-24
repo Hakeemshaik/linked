@@ -1,4 +1,4 @@
-import { q, one, run, id, now, getUser, friendIds, publicUser } from './db.js';
+import { q, one, run, id, now, getUser, friendIds, publicUser, prefsOf } from './db.js';
 
 // Live events reach clients one of two ways:
 //  - Pusher Channels (PUSHER_* set; required on Vercel, where functions can't hold sockets)
@@ -83,6 +83,8 @@ export const onScreen = (u) => !!(u?.visible && u.last_seen && Date.now() - Date
 export function presenceOf(u) {
   const online = onScreen(u);
   const status = !online || u.status === 'invisible' ? 'offline' : u.status;
+  // "Last seen and online: Nobody" hides both.
+  if (prefsOf(u).last_seen === 'nobody') return { ...publicUser(u), status: 'offline', online: false, last_seen: null };
   return { ...publicUser(u), status, online: online && u.status !== 'invisible' };
 }
 

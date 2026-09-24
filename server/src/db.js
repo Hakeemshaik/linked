@@ -10,7 +10,7 @@ export const DATA_DIR = process.env.DATA_DIR || path.join(SERVER_DIR, 'data');
 export const dbKind = URL ? 'postgres' : 'local';
 
 const NOW = `(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`;
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
@@ -175,6 +175,104 @@ CREATE TABLE IF NOT EXISTS media (
   data BYTEA NOT NULL,
   created_at TEXT NOT NULL
 );
+-- v6: your own settings per chat, starred messages, blocking, edited messages, documents, communities,
+-- chat lists, broadcasts, signed-in devices, passkeys, and privacy / notification preferences.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS prefs TEXT;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS muted_until TEXT;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS archived INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS pinned_at TEXT;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS cleared_at TEXT;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS hidden INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS marked_unread INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS theme TEXT;
+ALTER TABLE conversation_members ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS community_id TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS avatar TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS created_by TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS kind TEXT; -- 'announcements' for a community's announcements chat
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at TEXT;
+ALTER TABLE media ADD COLUMN IF NOT EXISTS name TEXT;
+CREATE TABLE IF NOT EXISTS stars (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS blocks (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, blocked_id)
+);
+CREATE TABLE IF NOT EXISTS communities (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  avatar TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS community_members (
+  community_id TEXT NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'member',
+  joined_at TEXT NOT NULL,
+  PRIMARY KEY (community_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS chat_lists (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  conversation_ids TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broadcasts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  member_ids TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broadcast_sends (
+  id TEXT PRIMARY KEY,
+  broadcast_id TEXT NOT NULL REFERENCES broadcasts(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  sent_to INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  last_active TEXT NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS passkeys (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  public_key TEXT NOT NULL,
+  counter INTEGER NOT NULL DEFAULT 0,
+  transports TEXT,
+  name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  last_used TEXT
+);
+CREATE TABLE IF NOT EXISTS auth_challenges (
+  id TEXT PRIMARY KEY,
+  challenge TEXT NOT NULL,
+  user_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS link_codes (
+  code TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 let driverP = null;
@@ -254,6 +352,20 @@ export const publicUser = (u) =>
     status_text: u.status_text,
     last_seen: u.last_seen,
   };
+
+/** Someone's privacy and notification settings, with defaults. */
+export const PREF_DEFAULTS = {
+  last_seen: 'everyone', // 'everyone' | 'nobody': show when you were last online (and online)
+  read_receipts: true, // blue ticks: off means you don't send them or see other people's
+  notify_messages: true, notify_groups: true, notify_reactions: true, notify_reminders: true,
+  previews: true, // show the message text in notifications
+  theme: 'system', accent: 'violet', text_size: 'm', wallpaper: 'dots', enter_sends: true, keep_archived: true,
+};
+export function prefsOf(u) {
+  let p = {};
+  try { p = u?.prefs ? (typeof u.prefs === 'string' ? JSON.parse(u.prefs) : u.prefs) : {}; } catch { /* bad JSON: defaults */ }
+  return { ...PREF_DEFAULTS, ...p };
+}
 
 export const getUser = (uid) => (uid ? one('SELECT * FROM users WHERE id = ?', [uid]) : Promise.resolve(undefined));
 /** Users for these ids, in the same order. */

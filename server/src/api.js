@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import {
-  q, one, run, id, now, publicUser, getUser, getUsers, findUser, friendIds, areFriends, isMember, memberIds, parseRow, dbKind,
+  q, one, run, id, now, publicUser, getUser, getUsers, findUser, friendIds, areFriends, isMember, memberIds, parseRow, dbKind, prefsOf,
 } from './db.js';
-import { signToken, requireAuth, inviteCodeFor, verifyInvite, verifyToken, internalSecret } from './auth.js';
+import { signToken, startSession, requireAuth, inviteCodeFor, verifyInvite, verifyToken, internalSecret } from './auth.js';
 import {
   presenceOf, broadcastPresence, emitToUser, emitToUsers, heartbeat, realtimeKind, realtimeClientConfig,
   authorizeChannel, addStream, readRelay, visibleUserIds,
@@ -15,12 +15,16 @@ import { runAI, converse, normalizePlan, aiInfo, aiErrorText, aiHeaders, aiMisco
 import { formatWhen, zonedToDate, TZ } from './time.js';
 import { remindAt, scheduleReminder, runReminders, queueUpcoming, maybeRunReminders, remindersKind, baseUrl } from './scheduler.js';
 import { background } from './background.js';
+import * as account from './features/account.js';
+import * as chatsFeature from './features/chats.js';
+import * as communitiesFeature from './features/communities.js';
 
 export const api = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const bad = (res, msg, code = 400) => res.status(code).json({ error: msg });
 
 const COLORS = ['#7c5cff', '#ff5c8a', '#22c7a9', '#ffb020', '#3fa7ff', '#ff7a45', '#a3e635', '#e879f9'];
+const STARTER_PICS = ['sprout', 'mochi', 'hop', 'pip', 'bo', 'lulu', 'ribbit', 'kit', 'hoot', 'bolt', 'zib', 'pan', 'waddle', 'rex', 'honey', 'nimbus', 'inky', 'fluff', 'koko'];
 const STATUSES = ['available', 'busy', 'work', 'away', 'invisible'];
 const TYPES = ['trip', 'hangout', 'meeting', 'call', 'event'];
 
@@ -109,25 +113,29 @@ api.post('/auth/register', wrap(async (req, res) => {
   if (!password || password.length < 6) return bad(res, 'Password must be at least 6 characters');
   if (await findUser(username)) return bad(res, 'Username taken');
   const uid = id();
-  const color = COLORS[(await one('SELECT COUNT(*)::int AS c FROM users')).c % COLORS.length];
+  const count = (await one('SELECT COUNT(*)::int AS c FROM users')).c;
+  const color = COLORS[count % COLORS.length];
+  // Everyone starts with one of the app's characters (so notifications show a face); they can change it in You.
+  const avatar = STARTER_PICS[crypto.randomInt(STARTER_PICS.length)];
   try {
-    await run('INSERT INTO users (id, username, display_name, password_hash, color) VALUES (?,?,?,?,?)', [
-      uid, username, (display_name || username).trim().slice(0, 40), await bcrypt.hash(password, 10), color,
+    await run('INSERT INTO users (id, username, display_name, password_hash, color, avatar) VALUES (?,?,?,?,?,?)', [
+      uid, username, (display_name || username).trim().slice(0, 40), await bcrypt.hash(password, 10), color, avatar,
     ]);
   } catch (e) {
     if (e.code === '23505') return bad(res, 'Username taken'); // two sign-ups raced for the same name
     throw e;
   }
   await ensureAIConversation(uid);
-  res.json({ token: await signToken(uid), user: publicUser(await getUser(uid)) });
+  res.json({ token: await startSession(uid, req), user: publicUser(await getUser(uid)) });
 }));
 
 api.post('/auth/login', wrap(async (req, res) => {
   const { username, password } = req.body || {};
   const u = await findUser(username);
   if (!u || !(await bcrypt.compare(password || '', u.password_hash))) return bad(res, 'Wrong username or password', 401);
+  if (u.password_hash === '!') return bad(res, 'Wrong username or password', 401); // deleted account
   await ensureAIConversation(u.id);
-  res.json({ token: await signToken(u.id), user: publicUser(u) });
+  res.json({ token: await startSession(u.id, req), user: publicUser(u) });
 }));
 
 // Who sent this invite link (shown on the sign-up screen before you have an account).
@@ -154,13 +162,19 @@ api.get('/realtime/stream', wrap(async (req, res) => {
 const MEDIA_KIND = {
   'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image', 'image/gif': 'image',
   'audio/mp4': 'voice', 'audio/x-m4a': 'voice', 'audio/aac': 'voice', 'audio/mpeg': 'voice', 'audio/webm': 'voice', 'audio/ogg': 'voice',
+  // documents: always downloaded, never shown as a page
+  'application/pdf': 'file', 'text/plain': 'file', 'text/csv': 'file', 'application/zip': 'file', 'application/rtf': 'file',
+  'application/msword': 'file', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'file',
+  'application/vnd.ms-excel': 'file', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'file',
+  'application/vnd.ms-powerpoint': 'file', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'file',
 };
 const MEDIA_ID = /^[a-f0-9]{32}$/;
 api.get('/media/:id', wrap(async (req, res) => {
-  const m = MEDIA_ID.test(req.params.id) && await one('SELECT type, size, data FROM media WHERE id = ?', [req.params.id]);
+  const m = MEDIA_ID.test(req.params.id) && await one('SELECT type, size, data, name FROM media WHERE id = ?', [req.params.id]);
   if (!m) return bad(res, 'Not found', 404);
   const buf = Buffer.from(m.data);
   res.set({ 'Cache-Control': 'public, max-age=31536000, s-maxage=31536000, immutable', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes', 'Content-Type': m.type });
+  if (MEDIA_KIND[m.type] === 'file') res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(m.name || 'document')}`);
   const r = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
   if (r && (r[1] || r[2])) {
     let start = r[1] ? Number(r[1]) : Math.max(0, buf.length - Number(r[2]));
@@ -170,6 +184,8 @@ api.get('/media/:id', wrap(async (req, res) => {
   }
   res.send(buf);
 }));
+
+account.publicRoutes(api, { wrap, bad });
 
 api.use(wrap(requireAuth));
 
@@ -181,9 +197,10 @@ api.post('/media', express.raw({ type: () => true, limit: '4mb' }), wrap(async (
   if (!(await isMember(convId, req.user.id))) return bad(res, 'Not found', 404);
   if (!Buffer.isBuffer(req.body) || !req.body.length) return bad(res, 'The file was empty');
   const mid = crypto.randomBytes(16).toString('hex');
-  await run('INSERT INTO media (id, owner_id, conversation_id, type, size, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [mid, req.user.id, convId, type, req.body.length, req.body, now()]);
-  res.json({ media: { id: mid, url: `/api/media/${mid}`, type, kind: MEDIA_KIND[type], size: req.body.length } });
+  const name = String(req.query.name || '').replace(/[\u0000-\u001f/\\]/g, '').slice(0, 120) || null;
+  await run('INSERT INTO media (id, owner_id, conversation_id, type, size, data, created_at, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [mid, req.user.id, convId, type, req.body.length, req.body, now(), name]);
+  res.json({ media: { id: mid, url: `/api/media/${mid}`, type, kind: MEDIA_KIND[type], size: req.body.length, name } });
 }));
 
 // Your invite link. Always on the production address, so a link shared from a preview deployment still works.
@@ -252,6 +269,7 @@ api.patch('/me', wrap(async (req, res) => {
 // Heartbeat from the app while it's on screen (and once when it's hidden). Returns friends' presence.
 api.post('/presence', wrap(async (req, res) => {
   await heartbeat(req.user, !!req.body?.visible);
+  if (req.user.sid) await run('UPDATE sessions SET last_active = ? WHERE id = ?', [now(), req.user.sid]); // for Linked devices
   maybeRunReminders();
   const friends = await getUsers(await friendIds(req.user.id));
   res.json({ friends: friends.map(presenceOf) });
@@ -579,23 +597,42 @@ async function ensureAIConversation(uid) {
 async function convSummaries(convs, uid) {
   if (!convs.length) return [];
   const ids = convs.map((c) => c.id);
-  const [memberRows, lastRows, unreadRows] = await Promise.all([
-    q('SELECT m.conversation_id, m.last_read_at, u.* FROM conversation_members m JOIN users u ON u.id = m.user_id WHERE m.conversation_id = ANY(?)', [ids]),
-    q('SELECT DISTINCT ON (conversation_id) * FROM messages WHERE conversation_id = ANY(?) ORDER BY conversation_id, created_at DESC', [ids]),
+  const [memberRows, lastRows, unreadRows, comms] = await Promise.all([
+    q(`SELECT m.conversation_id, m.last_read_at, m.muted_until, m.archived, m.pinned_at, m.favorite, m.cleared_at, m.hidden, m.marked_unread,
+         m.theme, m.role AS member_role, u.*
+       FROM conversation_members m JOIN users u ON u.id = m.user_id WHERE m.conversation_id = ANY(?)`, [ids]),
+    // The last message you can still see (clearing a chat hides what came before).
+    q(`SELECT DISTINCT ON (x.conversation_id) x.* FROM messages x
+       JOIN conversation_members m ON m.conversation_id = x.conversation_id AND m.user_id = ?
+       WHERE x.conversation_id = ANY(?) AND x.created_at > COALESCE(m.cleared_at, '') ORDER BY x.conversation_id, x.created_at DESC`, [uid, ids]),
     q(`SELECT m.conversation_id, COUNT(x.id)::int AS c FROM conversation_members m
-       JOIN messages x ON x.conversation_id = m.conversation_id AND (x.sender_id IS NULL OR x.sender_id != m.user_id) AND x.created_at > COALESCE(m.last_read_at, '')
+       JOIN messages x ON x.conversation_id = m.conversation_id AND (x.sender_id IS NULL OR x.sender_id != m.user_id) AND x.kind != 'system'
+         AND x.created_at > COALESCE(m.last_read_at, '')
        WHERE m.user_id = ? AND m.conversation_id = ANY(?) GROUP BY m.conversation_id`, [uid, ids]),
+    q('SELECT id, name, avatar FROM communities WHERE id = ANY(?)', [[...new Set(convs.map((c) => c.community_id).filter(Boolean))]]),
   ]);
   const senders = await usersById(lastRows.map((m) => m.sender_id));
   const lasts = new Map(lastRows.map((m) => [m.conversation_id, messagePayload(parseRow(m), senders)]));
   const unread = new Map(unreadRows.map((r) => [r.conversation_id, r.c]));
+  const communities = new Map(comms.map((x) => [x.id, x]));
+  const blocked = new Set(await chatsFeature.blockedIds(uid));
+  const t = now();
   return convs.map((c) => {
     const rows = memberRows.filter((r) => r.conversation_id === c.id);
-    const members = rows.map((u) => (u.id === uid ? { ...publicUser(u), me: true } : presenceOf(u)));
+    const mine = rows.find((r) => r.id === uid) || {};
+    const myPrefs = prefsOf(mine);
+    const members = rows.map((u) => (u.id === uid ? { ...publicUser(u), me: true, role: u.member_role } : { ...presenceOf(u), role: u.member_role, blocked: blocked.has(u.id) }));
     const others = members.filter((m) => !m.me);
     const title = c.is_ai ? 'Planner' : c.name || others.map((m) => m.display_name).join(', ') || 'Just you';
-    const reads = Object.fromEntries(rows.map((r) => [r.id, r.last_read_at]));
-    return { ...c, title, members, reads, last_message: lasts.get(c.id) || null, unread: unread.get(c.id) || 0 };
+    // Read receipts: someone who turned them off doesn't share theirs, and sees nobody else's.
+    const reads = Object.fromEntries(rows.filter((r) => r.id === uid || (myPrefs.read_receipts && prefsOf(r).read_receipts)).map((r) => [r.id, r.last_read_at]));
+    const muted = !!mine.muted_until && mine.muted_until > t;
+    return {
+      ...c, title, members, reads, last_message: lasts.get(c.id) || null, unread: unread.get(c.id) || 0,
+      muted, muted_until: muted ? mine.muted_until : null, archived: !!mine.archived, pinned_at: mine.pinned_at || null, favorite: !!mine.favorite,
+      marked_unread: !!mine.marked_unread, theme: mine.theme || null, hidden: !!mine.hidden, cleared_at: mine.cleared_at || null, my_role: mine.member_role || null,
+      community: c.community_id ? communities.get(c.community_id) || null : null,
+    };
   });
 }
 const convSummary = async (convId, uid) => (await convSummaries([await one('SELECT * FROM conversations WHERE id = ?', [convId])], uid))[0];
@@ -612,7 +649,8 @@ api.get('/conversations', wrap(async (req, res) => {
     `SELECT c.* FROM conversations c JOIN conversation_members m ON m.conversation_id = c.id WHERE m.user_id = ? ORDER BY c.updated_at DESC`,
     [req.user.id]
   );
-  res.json({ conversations: await convSummaries(rows, req.user.id) });
+  // A chat you deleted stays off your list until someone writes in it again.
+  res.json({ conversations: (await convSummaries(rows, req.user.id)).filter((c) => !c.hidden) });
 }));
 
 api.get('/conversations/:id', wrap(async (req, res) => {
@@ -637,19 +675,28 @@ api.post('/conversations', wrap(async (req, res) => {
 }));
 
 api.get('/conversations/:id/messages', wrap(async (req, res) => {
-  if (!(await isMember(req.params.id, req.user.id))) return bad(res, 'Not found', 404);
+  const me = await one('SELECT cleared_at FROM conversation_members WHERE conversation_id = ? AND user_id = ?', [req.params.id, req.user.id]);
+  if (!me) return bad(res, 'Not found', 404);
   const before = req.query.before || '9999';
   const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 60));
-  const rows = (await q('SELECT * FROM messages WHERE conversation_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?', [req.params.id, before, limit])).reverse();
-  const [users, reacts] = await Promise.all([usersById(rows.map((m) => m.sender_id)), reactionsFor(rows.map((m) => m.id))]);
-  res.json({ messages: rows.map((m) => ({ ...messagePayload(parseRow(m), users), reactions: reacts.get(m.id) || {} })), more: rows.length === limit });
+  const rows = (await q('SELECT * FROM messages WHERE conversation_id = ? AND created_at < ? AND created_at > ? ORDER BY created_at DESC LIMIT ?',
+    [req.params.id, before, me.cleared_at || '', limit])).reverse();
+  const mids = rows.map((m) => m.id);
+  const [users, reacts, stars] = await Promise.all([usersById(rows.map((m) => m.sender_id)), reactionsFor(mids),
+    mids.length ? q('SELECT message_id FROM stars WHERE user_id = ? AND message_id = ANY(?)', [req.user.id, mids]) : []]);
+  const starred = new Set(stars.map((r) => r.message_id));
+  res.json({ messages: rows.map((m) => ({ ...messagePayload(parseRow(m), users), reactions: reacts.get(m.id) || {}, ...(starred.has(m.id) ? { starred: true } : {}) })), more: rows.length === limit });
 }));
 
 api.post('/conversations/:id/read', wrap(async (req, res) => {
   if (!(await isMember(req.params.id, req.user.id))) return bad(res, 'Not found', 404);
   const at = now();
-  await run('UPDATE conversation_members SET last_read_at = ? WHERE conversation_id = ? AND user_id = ?', [at, req.params.id, req.user.id]);
-  await emitToUsers(await memberIds(req.params.id), 'read', { conversation_id: req.params.id, user_id: req.user.id, at });
+  await run('UPDATE conversation_members SET last_read_at = ?, marked_unread = 0 WHERE conversation_id = ? AND user_id = ?', [at, req.params.id, req.user.id]);
+  // Opening the chat also clears its alerts (plan cards etc.), like reading them.
+  await run(`UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0 AND (url = ? OR data LIKE ?)`, [req.user.id, `/chat/${req.params.id}`, `%"conversation_id":"${req.params.id}"%`]);
+  // With read receipts off, nobody is told you read it.
+  const who = prefsOf(req.user).read_receipts ? await memberIds(req.params.id) : [req.user.id];
+  await emitToUsers(who, 'read', { conversation_id: req.params.id, user_id: req.user.id, at });
   res.json({ ok: true });
 }));
 
@@ -691,6 +738,7 @@ function messageText(kind, body, data) {
   if (kind === 'gif') return 'Sent a GIF';
   if (kind === 'image') return body ? `Photo: ${lockScreenText(body)}` : 'Photo';
   if (kind === 'voice') return `Voice message (${clock(data?.duration || 0)})`;
+  if (kind === 'file') return `Document: ${body}`;
   return lockScreenText(body);
 }
 
@@ -700,7 +748,8 @@ async function postMessage(convId, sender, kind, body, data = null, clientId = n
   await run('INSERT INTO messages (id, conversation_id, sender_id, kind, body, data, created_at) VALUES (?,?,?,?,?,?,?)',
     [mid, convId, sender?.id || null, kind, body, data ? JSON.stringify(data) : null, ts]);
   await run('UPDATE conversations SET updated_at = ? WHERE id = ?', [ts, convId]);
-  if (sender) await run('UPDATE conversation_members SET last_read_at = ? WHERE conversation_id = ? AND user_id = ?', [ts, convId, sender.id]);
+  await run('UPDATE conversation_members SET hidden = 0 WHERE conversation_id = ? AND hidden = 1', [convId]); // a deleted chat comes back
+  if (sender) await run('UPDATE conversation_members SET last_read_at = ?, marked_unread = 0 WHERE conversation_id = ? AND user_id = ?', [ts, convId, sender.id]);
   // client_id lets the sender's phone swap its instant "sending" bubble for the real one.
   const msg = { id: mid, conversation_id: convId, sender_id: sender?.id || null, kind, body, data, created_at: ts, sender: sender ? publicUser(sender) : null, reactions: {}, ...(clientId ? { client_id: clientId } : {}) };
   const [members, conv] = await Promise.all([memberIds(convId), one('SELECT * FROM conversations WHERE id = ?', [convId])]);
@@ -713,13 +762,20 @@ async function postMessage(convId, sender, kind, body, data = null, clientId = n
     title = `Planner suggested: ${p.title}`;
     text = [p.start_at ? formatWhen(p.start_at, p.end_at) : 'date not set yet', p.location].filter(Boolean).join(' · ') + ' · Tap to confirm';
   }
+  // Who gets told: not you, not anyone who muted the chat or turned these notifications off.
+  const rows = await q('SELECT m.user_id, m.muted_until, u.prefs FROM conversation_members m JOIN users u ON u.id = m.user_id WHERE m.conversation_id = ?', [convId]);
+  const quiet = (r) => (r.muted_until && r.muted_until > ts) || !prefsOf(r)[conv.is_group ? 'notify_groups' : 'notify_messages'];
+  const tell = rows.filter((r) => r.user_id !== sender?.id && kind !== 'system' && !quiet(r));
+  const base = {
+    kind: 'message', title, url: `/chat/${convId}`, tag: `chat-${convId}`,
+    data: { conversation_id: convId, from: sender ? publicUser(sender) : null }, store: kind === 'plan',
+  };
+  const full = tell.filter((r) => prefsOf(r).previews).map((r) => r.user_id);
+  const hidden = tell.filter((r) => !prefsOf(r).previews).map((r) => r.user_id);
   await Promise.all([
     emitToUsers(members, 'message', msg),
-    notify(members.filter((u) => u !== sender?.id), {
-      kind: 'message', title, body: text.slice(0, 240), url: `/chat/${convId}`, tag: `chat-${convId}`,
-      data: { conversation_id: convId, from: sender ? publicUser(sender) : null }, store: kind === 'plan',
-      image: kind === 'image' ? data.url : undefined,
-    }),
+    notify(full, { ...base, body: text.slice(0, 240), image: kind === 'image' ? data.url : undefined }),
+    notify(hidden, { ...base, body: 'New message' }), // previews off: who it's from, not what it says
   ]);
   return msg;
 }
@@ -785,8 +841,16 @@ async function aiRespond(convId, requesterId, mode, instruction, trigger = null)
 api.post('/conversations/:id/messages', wrap(async (req, res) => {
   const convId = req.params.id;
   if (!(await isMember(convId, req.user.id))) return bad(res, 'Not found', 404);
-  // Stickers and GIFs are the app's own art, sent by id. Photos and voice messages are uploaded to /media first.
-  const kind = ['sticker', 'gif', 'image', 'voice'].includes(req.body?.kind) ? req.body.kind : 'text';
+  const convInfo = await one('SELECT is_group, is_ai FROM conversations WHERE id = ?', [convId]);
+  if (!convInfo.is_group && !convInfo.is_ai) {
+    const other = (await memberIds(convId)).find((u) => u !== req.user.id);
+    if (other && (await chatsFeature.blockedBetween(req.user.id, other))) {
+      const iBlocked = await one('SELECT 1 AS x FROM blocks WHERE user_id = ? AND blocked_id = ?', [req.user.id, other]);
+      return bad(res, iBlocked ? 'You blocked this person. Unblock them to send a message.' : "You can't message this person", 403);
+    }
+  }
+  // Stickers and GIFs are the app's own art, sent by id. Photos and voice messages are uploaded to /media first; documents too.
+  const kind = ['sticker', 'gif', 'image', 'voice', 'file'].includes(req.body?.kind) ? req.body.kind : 'text';
   const clientId = /^[a-z0-9]{4,40}$/i.test(req.body?.client_id || '') ? req.body.client_id : null;
   // Replying: keep a short copy of the message being answered, so the quote survives edits and deletes.
   let reply = null;
@@ -794,13 +858,16 @@ api.post('/conversations/:id/messages', wrap(async (req, res) => {
     const o = parseRow(await one('SELECT m.id, m.kind, m.body, m.data, m.sender_id, u.display_name FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.id = ? AND m.conversation_id = ?', [req.body.reply_to, convId]));
     if (o && o.kind !== 'deleted') reply = quoteOf(o);
   }
-  if (kind === 'image' || kind === 'voice') {
+  if (kind === 'image' || kind === 'voice' || kind === 'file') {
     const mid = String(req.body?.media || '');
-    const m = MEDIA_ID.test(mid) && await one('SELECT id, type, size, owner_id, conversation_id FROM media WHERE id = ?', [mid]);
+    const m = MEDIA_ID.test(mid) && await one('SELECT id, type, size, owner_id, conversation_id, name FROM media WHERE id = ?', [mid]);
     if (!m || m.owner_id !== req.user.id || m.conversation_id !== convId || MEDIA_KIND[m.type] !== kind) return bad(res, 'Send the file again');
     const data = { media: m.id, url: `/api/media/${m.id}`, type: m.type, size: m.size, ...(reply ? { reply } : {}) };
     let body = '';
-    if (kind === 'image') {
+    if (kind === 'file') {
+      data.name = m.name || 'Document';
+      body = data.name;
+    } else if (kind === 'image') {
       const dim = (v) => Math.min(10000, Math.max(1, Math.round(Number(v)) || 1));
       Object.assign(data, { w: dim(req.body.w), h: dim(req.body.h) });
       const thumb = String(req.body.thumb || '');
@@ -926,8 +993,8 @@ api.post('/invites', wrap(async (req, res) => {
   const { to_ids = [], kind = 'call', message = '' } = req.body || {};
   if (!['call', 'chill'].includes(kind)) return bad(res, 'Bad kind');
   const to = [];
-  for (const u of new Set(to_ids)) if (await areFriends(req.user.id, u)) to.push(u);
-  if (!to.length) return bad(res, 'Pick a friend');
+  for (const u of new Set(to_ids)) if ((await areFriends(req.user.id, u)) && !(await chatsFeature.blockedBetween(req.user.id, u))) to.push(u);
+  if (!to.length) return bad(res, to_ids.length ? "You can't call this person" : 'Pick a friend');
   const room = kind === 'call' ? id() : null;
   const created = await Promise.all(to.map(async (uid) => {
     const iid = id();
@@ -1140,6 +1207,15 @@ api.post('/notifications/read-all', wrap(async (req, res) => {
   await run('UPDATE notifications SET read = 1 WHERE user_id = ?', [req.user.id]);
   res.json({ ok: true });
 }));
+// Seeing something marks its alerts read: the Calls tab clears missed calls, a plan page clears its invites.
+api.post('/notifications/read', wrap(async (req, res) => {
+  const kinds = Array.isArray(req.body?.kinds) ? req.body.kinds.map(String).slice(0, 20) : null;
+  const url = typeof req.body?.url === 'string' ? req.body.url.slice(0, 200) : null;
+  if (!kinds && !url) return bad(res, 'Say which alerts');
+  const n = await run(`UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0 AND (${kinds ? 'kind = ANY(?)' : 'FALSE'} OR ${url ? 'url = ?' : 'FALSE'})`,
+    [req.user.id, ...(kinds ? [kinds] : []), ...(url ? [url] : [])]);
+  res.json({ read: n });
+}));
 api.post('/notifications/:id/read', wrap(async (req, res) => {
   await run('UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
   res.json({ ok: true });
@@ -1173,3 +1249,24 @@ api.get('/ai/status', wrap(async (req, res) => {
     res.json({ online: false, model: aiInfo.model });
   }
 }));
+
+// ---------- the rest: account, chat tools, communities (server/src/features) ----------
+/** A small grey note in a chat ("Ada added Ben"): live for everyone in it, but no notification. */
+async function systemMessage(convId, body) {
+  const mid = id();
+  const ts = now();
+  await run(`INSERT INTO messages (id, conversation_id, sender_id, kind, body, created_at) VALUES (?, ?, NULL, 'system', ?, ?)`, [mid, convId, body, ts]);
+  await run('UPDATE conversations SET updated_at = ? WHERE id = ?', [ts, convId]);
+  await emitToUsers(await memberIds(convId), 'message', { id: mid, conversation_id: convId, sender_id: null, kind: 'system', body, data: null, created_at: ts, sender: null, reactions: {} });
+}
+async function newDM(a, b) {
+  const cid = id();
+  await run('INSERT INTO conversations (id, name, is_group) VALUES (?, NULL, 0)', [cid]);
+  for (const u of [a, b]) await run('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)', [cid, u]);
+  await emitToUsers([a, b], 'conversations:changed', {});
+  return cid;
+}
+const helpers = { wrap, bad, postMessage, convSummary, systemMessage, findDM, newDM };
+account.routes(api, helpers);
+chatsFeature.routes(api, helpers);
+communitiesFeature.routes(api, helpers);
