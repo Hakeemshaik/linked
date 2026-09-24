@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { patch } from '../lib/api.js';
 import { APP_VERSION } from '../lib/update.js';
 import { useApp, STATUS } from '../lib/store.jsx';
@@ -11,7 +12,8 @@ export default function Settings() {
   const [editName, setEditName] = useState(false);
   const [name, setName] = useState(me?.display_name || '');
   const [statusOpen, setStatusOpen] = useState(false);
-  const [picOpen, setPicOpen] = useState(false);
+  const [qs] = useSearchParams();
+  const [picOpen, setPicOpen] = useState(qs.get('pic') === '1');
   const [text, setText] = useState('');
   useEffect(() => { setText(me?.status_text || ''); }, [me?.status_text]);
   const st = STATUS[me?.status] || STATUS.available;

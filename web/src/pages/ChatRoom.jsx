@@ -1,12 +1,44 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { get, post } from '../lib/api.js';
-import { useApp, useSocket, STATUS } from '../lib/store.jsx';
+import { get, post, del } from '../lib/api.js';
+import { useApp, useSocket } from '../lib/store.jsx';
 import { Avatar, Orb, Icon, Sheet, TYPE_LABEL, reminderLabel } from '../components/ui.jsx';
-import { fmtRange, fmtTime, relDay, dayKey, ago } from '../lib/dates.js';
+import { fmtRange, fmtTime, relDay, dayKey } from '../lib/dates.js';
 import ArtPicker from '../components/ArtPicker.jsx';
 import RichText, { emojiOnly } from '../components/RichText.jsx';
-import { stickerUrl, gifUrl } from '../lib/art.js';
+import { EMOJI, emojiUrl, stickerUrl, gifUrl } from '../lib/art.js';
+
+const QUICK = ['love', 'lol', 'hype', 'cheers', 'party', 'meh'];
+const HOLD_MS = 420;
+const SWIPE = 56; // px to the right that turns a swipe into a reply
+const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+const keyOf = (m) => m?.client_id || m?.id;
+const isMedia = (kind) => kind === 'sticker' || kind === 'gif';
+const smooth = () => !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/** One reaction each: the same emoji takes yours back, another swaps it. */
+function toggleReaction(r = {}, emoji, uid) {
+  const had = (r[emoji] || []).includes(uid);
+  const out = {};
+  for (const [e, ids] of Object.entries(r)) {
+    const left = ids.filter((u) => u !== uid);
+    if (left.length) out[e] = left;
+  }
+  if (!had) out[emoji] = [...(out[emoji] || []), uid];
+  return out;
+}
+
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch { /* older browsers */ }
+  const ta = document.createElement('textarea');
+  ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { /* ignore */ }
+  ta.remove();
+  return ok;
+}
 
 /* Planner's plan suggestion, rendered as a notice card. */
 function PlanCard({ msg, members, onDone }) {
@@ -108,45 +140,326 @@ function lastSeen(u) {
   return `last seen ${day} at ${fmtTime(d)}`;
 }
 
+/* The message being answered: inside a reply bubble, and above the composer while you write one. */
+function Quote({ q, me, color, onClick }) {
+  const who = q.sender_id && q.sender_id === me?.id ? 'You' : q.sender_name || 'Planner';
+  const Tag = onClick ? 'button' : 'div';
+  return (
+    <Tag type={onClick ? 'button' : undefined} className="quote" style={{ '--qc': color }} onClick={onClick}>
+      <span className="quote-text">
+        <b className="ellipsis">{who}</b>
+        <span className="quote-body">{isMedia(q.kind) ? (q.kind === 'gif' ? 'GIF' : 'Sticker') : q.kind === 'plan' ? `Plan: ${q.body}` : <RichText text={q.body} />}</span>
+      </span>
+      {isMedia(q.kind) && q.ref && <img src={q.kind === 'gif' ? gifUrl(q.ref) : stickerUrl(q.ref)} alt="" draggable="false" />}
+    </Tag>
+  );
+}
+
+/* The reactions on a message, as one small pill under it. Tap it to see who. */
+function ReactPill({ r, meId, onOpen }) {
+  const list = Object.entries(r || {}).sort((a, b) => b[1].length - a[1].length);
+  if (!list.length) return null;
+  const total = list.reduce((n, [, ids]) => n + ids.length, 0);
+  return (
+    <button key={total} type="button" className={`react-pill ${list.some(([, ids]) => ids.includes(meId)) ? 'mine' : ''}`} onClick={onOpen}
+      aria-label={`${total} reaction${total > 1 ? 's' : ''}`}>
+      {list.slice(0, 3).map(([e]) => <img key={e} src={emojiUrl(e)} alt="" draggable="false" />)}
+      {total > 1 && <span>{total}</span>}
+    </button>
+  );
+}
+
+/* One message row. Hold it (or right-click) for the menu, swipe it right to reply. */
+function Row({ id, side, first, pop, onHold, onSwipe, onTap, children }) {
+  const ref = useRef(null);
+  const g = useRef(null);
+  const dxRef = useRef(0);
+  const [dx, setDx] = useState(0);
+  const offset = (v) => { dxRef.current = v; setDx(v); };
+  const hold = () => onHold?.(ref.current?.querySelector('.bubble, .media-msg'));
+
+  const down = (e) => {
+    g.current = null;
+    if ((!onHold && !onSwipe) || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    const s = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    if (onHold) s.t = setTimeout(() => { s.fired = true; navigator.vibrate?.(12); hold(); }, HOLD_MS);
+    g.current = s;
+  };
+  const move = (e) => {
+    const s = g.current;
+    if (!s || s.fired || s.id !== e.pointerId) return;
+    const mx = e.clientX - s.x;
+    const my = e.clientY - s.y;
+    if (!s.swiping) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+      clearTimeout(s.t);
+      if (!onSwipe || mx <= 0 || Math.abs(mx) < Math.abs(my) * 1.4) { g.current = null; return; }
+      s.swiping = true;
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+    const v = Math.max(0, Math.min(mx - 8, SWIPE + 28));
+    if (v >= SWIPE && dxRef.current < SWIPE) navigator.vibrate?.(8);
+    offset(v);
+  };
+  const up = () => {
+    const s = g.current;
+    if (!s) return;
+    clearTimeout(s.t);
+    if (s.swiping) {
+      if (dxRef.current >= SWIPE) onSwipe();
+      offset(0);
+      g.current = { fired: true };
+    } else if (!s.fired) g.current = null;
+  };
+  // The click that ends a hold or a swipe shouldn't also count as a tap.
+  const click = (e) => {
+    if (!g.current?.fired) return;
+    e.preventDefault(); e.stopPropagation();
+    g.current = null;
+  };
+  const context = (e) => {
+    e.preventDefault();
+    if (!onHold || g.current?.fired) return;
+    clearTimeout(g.current?.t);
+    g.current = { fired: true };
+    hold();
+  };
+  const p = Math.min(1, dx / SWIPE);
+  return (
+    <div ref={ref} id={`m-${id}`} className={`row-msg ${side} ${first ? 'first' : ''} ${pop ? 'pop' : ''} ${dx ? 'swiping' : ''}`}
+      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+      onPointerLeave={(e) => e.pointerType === 'mouse' && !g.current?.swiping && up()}
+      onClickCapture={click} onContextMenu={context}>
+      <div className="msg-col" style={dx ? { transform: `translateX(${dx}px)` } : undefined} onClick={onTap}>
+        {dx > 0 && <span className="swipe-reply" style={{ opacity: p, transform: `scale(${0.5 + p * 0.5})` }}><Icon name="reply" size={18} /></span>}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* Held message: it lifts out of the chat, with reactions above it and actions below. */
+function MessageMenu({ at, side, canReact, reactions, meId, names, onReact, actions, onClose, children }) {
+  const [all, setAll] = useState(false);
+  const [ask, setAsk] = useState(null);
+  // Lifting the finger that opened the menu isn't a tap outside it: only a new touch closes it.
+  const armed = useRef(false);
+  useEffect(() => {
+    const k = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', k);
+    return () => window.removeEventListener('keydown', k);
+  }, [onClose]);
+  const vv = window.visualViewport;
+  const vTop = vv?.offsetTop || 0;
+  const vh = vv?.height || window.innerHeight;
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const who = Object.entries(reactions || {});
+  const barH = canReact ? (all ? 104 : 52) + 8 : 0;
+  const menuH = 8 + (ask ? 112 : actions.length * 46) + (who.length ? who.length * 30 + 16 : 0);
+  const clamp = at.height > vh * 0.38;
+  const h = clamp ? vh * 0.38 : at.height;
+  const top = Math.max(vTop + 56 + barH, Math.min(at.top, vTop + vh - 16 - menuH - h));
+  const place = side === 'out' ? { right: Math.max(10, vw - at.right) } : { left: Math.max(10, at.left) };
+  const mine = (e) => (reactions?.[e] || []).includes(meId);
+  return createPortal(
+    <div className="focus-layer" onPointerDown={() => { armed.current = true; }} onClick={() => armed.current && onClose()} onContextMenu={(e) => e.preventDefault()}>
+      <div className={`focus ${side}`} style={{ top, width: at.width, ...place }} onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Message options">
+        {canReact && (
+          <div className={`react-bar ${all ? 'all' : ''}`}>
+            {(all ? EMOJI.map((e) => e.id) : QUICK).map((e) => (
+              <button key={e} type="button" className={mine(e) ? 'on' : ''} onClick={() => onReact(e)} aria-label={`React with ${e}`} aria-pressed={mine(e)}>
+                <img src={emojiUrl(e)} alt="" draggable="false" />
+              </button>
+            ))}
+            {!all && <button type="button" className="more" onClick={() => setAll(true)} aria-label="More reactions"><Icon name="plus" size={20} /></button>}
+          </div>
+        )}
+        <div className={`focus-msg ${clamp ? 'clamp' : ''}`} style={clamp ? { maxHeight: h } : undefined}>{children}</div>
+        <div className="focus-menu">
+          {who.length > 0 && (
+            <div className="focus-who">
+              {who.map(([e, ids]) => <div key={e}><img src={emojiUrl(e)} alt={e} draggable="false" /><span className="ellipsis">{names(ids)}</span></div>)}
+            </div>
+          )}
+          {ask ? (
+            <div className="focus-ask">
+              <p>{ask.confirm}</p>
+              <div className="row gap">
+                <button type="button" className="btn grow" onClick={() => setAsk(null)}>Cancel</button>
+                <button type="button" className="btn danger grow" onClick={ask.run}>Delete</button>
+              </div>
+            </div>
+          ) : actions.map((a) => (
+            <button key={a.label} type="button" className={a.danger ? 'danger-text' : ''} onClick={a.confirm ? () => setAsk(a) : a.run}>
+              {a.label}<Icon name={a.icon} size={20} />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+const SKELETON = [['in', 58, 36], ['in', 36, 36], ['out', 52, 50], ['in', 66, 50], ['out', 34, 36], ['out', 60, 36], ['in', 44, 36]];
+
 export function ChatView({ convId: id }) {
   const { me, friends, navigate, toast, loadUnread } = useApp();
   const [qs, setQs] = useSearchParams();
   const [conv, setConv] = useState(null);
+  // Who you are, from the chat itself too, so nothing waits for the profile to load.
+  const self = me || conv?.members.find((u) => u.me) || null;
+  const meId = self?.id;
   const [msgs, setMsgs] = useState([]);
+  const [more, setMore] = useState(false);
+  const [older, setOlder] = useState(false);
   const [text, setText] = useState(qs.get('draft') || '');
   const [thinking, setThinking] = useState(false);
   const [typing, setTyping] = useState(null);
   const [attach, setAttach] = useState(false);
   const [picker, setPicker] = useState(false);
-  const endRef = useRef(null);
+  const [replyTo, setReplyTo] = useState(null);
+  const [menu, setMenu] = useState(null);
+  const [jump, setJump] = useState(false);
+  const [unseen, setUnseen] = useState(0);
+  const listRef = useRef(null);
   const inputRef = useRef(null);
   const lastTyping = useRef(0);
   const typingTimer = useRef(null);
   const freshIds = useRef(new Set());
   const initialIds = useRef(null);
+  const nearEnd = useRef(true);
+  const autoAt = useRef(0);
+  const anchor = useRef(null);
+  const placed = useRef(false);
+  const lastKey = useRef(null);
+  const lastHeight = useRef(0);
+  const unreadMark = useRef(null);
+  const loadingOlder = useRef(false);
+  const msgsRef = useRef(msgs);
+  msgsRef.current = msgs;
 
   const markRead = () => post(`/conversations/${id}/read`).then(loadUnread).catch(() => {});
 
   useEffect(() => {
-    setMsgs([]); setConv(null);
-    get(`/conversations/${id}`).then((r) => setConv(r.conversation)).catch(() => navigate('/', { replace: true }));
-    get(`/conversations/${id}/messages`).then((r) => { initialIds.current = new Set(r.messages.map((m) => m.id)); setMsgs(r.messages); });
-    markRead();
+    let live = true;
+    Promise.all([get(`/conversations/${id}`), get(`/conversations/${id}/messages`)]).then(async ([c, r]) => {
+      // Where you left off: the first message that came in since you last read this chat.
+      const myId = c.conversation.members.find((u) => u.me)?.id;
+      const seen = c.conversation.reads?.[myId] || '';
+      const isNew = (m) => m.sender_id !== myId && m.kind !== 'system' && m.created_at > seen;
+      const unread = c.conversation.unread;
+      const shown = r.messages.filter(isNew).length;
+      // Lots came in: load back far enough to start at the first one you haven't seen.
+      if (unread > shown && r.more && r.messages.length) {
+        const back = await get(`/conversations/${id}/messages?before=${encodeURIComponent(r.messages[0].created_at)}&limit=${Math.min(200, unread - shown + 5)}`).catch(() => null);
+        if (back) r = { messages: [...back.messages, ...r.messages], more: back.more };
+      }
+      if (!live) return;
+      const firstNew = unread > 0 && r.messages.find(isNew);
+      // Only worth a line when there's earlier conversation above it.
+      const above = firstNew && (r.more || r.messages.slice(0, r.messages.indexOf(firstNew)).some((m) => m.kind !== 'system'));
+      unreadMark.current = above ? { id: firstNew.id, n: unread } : null;
+      initialIds.current = new Set(r.messages.map((m) => m.id));
+      setConv(c.conversation); setMsgs(r.messages); setMore(!!r.more);
+      markRead();
+    }).catch(() => live && navigate('/', { replace: true }));
     // Reading the chat clears its notifications from the lock screen.
     navigator.serviceWorker?.ready.then((r) => r.getNotifications({ tag: `chat-${id}` })).then((ns) => ns?.forEach((n) => n.close())).catch(() => {});
     if (qs.get('draft')) { setText(qs.get('draft')); setQs({}, { replace: true }); setTimeout(() => inputRef.current?.focus(), 300); }
+    return () => { live = false; };
   }, [id]); // eslint-disable-line
 
-  useLayoutEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs.length, thinking, typing]);
+  const toEnd = (animate) => {
+    const el = listRef.current;
+    if (!el) return;
+    nearEnd.current = true;
+    autoAt.current = Date.now();
+    if (animate && smooth()) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
+    setUnseen(0);
+  };
+
+  // Scroll: open where you left off, follow new messages only if you're already at the bottom
+  // (or you sent it), and keep your place when older messages load in above.
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (!el || !conv) return;
+    if (anchor.current) {
+      el.scrollTop = el.scrollHeight - anchor.current.h + anchor.current.top;
+      anchor.current = null;
+      lastHeight.current = el.scrollHeight;
+      return;
+    }
+    const last = msgs[msgs.length - 1];
+    const appended = keyOf(last) !== lastKey.current;
+    lastKey.current = keyOf(last);
+    if (!placed.current) {
+      placed.current = true;
+      const mark = unreadMark.current && document.getElementById('unread-mark');
+      if (mark) el.scrollTop += mark.getBoundingClientRect().top - el.getBoundingClientRect().top - 48;
+      else el.scrollTop = el.scrollHeight;
+      nearEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+      lastHeight.current = el.scrollHeight;
+      return;
+    }
+    const grew = el.scrollHeight !== lastHeight.current;
+    lastHeight.current = el.scrollHeight;
+    if (appended && last?.pending) return toEnd(true); // you just sent it from here
+    if (nearEnd.current && (appended || grew)) return toEnd(appended);
+    if (appended && last) setUnseen((n) => n + 1);
+  }, [msgs, conv, thinking, typing]); // eslint-disable-line
+
+  const loadOlder = async () => {
+    const oldest = msgs.find((m) => !m.pending && !m.failed);
+    if (!oldest || loadingOlder.current) return;
+    loadingOlder.current = true; setOlder(true);
+    try {
+      const r = await get(`/conversations/${id}/messages?before=${encodeURIComponent(oldest.created_at)}`);
+      const el = listRef.current;
+      if (el) anchor.current = { h: el.scrollHeight, top: el.scrollTop };
+      r.messages.forEach((m) => initialIds.current?.add(m.id));
+      setMsgs((x) => [...r.messages.filter((m) => !x.some((y) => y.id === m.id)), ...x]);
+      setMore(!!r.more);
+    } catch { /* the next scroll tries again */ } finally { loadingOlder.current = false; setOlder(false); }
+  };
+
+  const onScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // A smooth scroll to the bottom passes through "not at the bottom"; don't let that count.
+    if (dist < 150 || Date.now() - autoAt.current > 700) nearEnd.current = dist < 150;
+    if ((dist > 360) !== jump) setJump(dist > 360);
+    if (dist < 150 && unseen) setUnseen(0);
+    if (more && el.scrollTop < 400) loadOlder();
+  };
+
+  /** Add a message, or swap in the server's copy of one we're already showing. */
+  const upsert = (m) => setMsgs((x) => {
+    const i = x.findIndex((y) => y.id === m.id || (m.client_id && y.client_id === m.client_id));
+    if (i < 0) return [...x, m];
+    const next = x.slice();
+    next[i] = { ...m, client_id: x[i].client_id || m.client_id };
+    return next;
+  });
 
   useSocket('message', (m) => {
     if (m.conversation_id !== id) return;
     if (!m.sender_id) freshIds.current.add(m.id);
-    setMsgs((x) => (x.some((y) => y.id === m.id) ? x : [...x, m]));
-    if (m.sender_id !== me?.id) markRead();
-    setTyping(null);
+    upsert(m);
+    if (m.sender_id !== meId) markRead();
+    if (m.sender_id) setTyping((t) => (t?.id === m.sender_id ? null : t));
   });
-  useSocket('message:update', (m) => m.conversation_id === id && setMsgs((x) => x.map((y) => (y.id === m.id ? m : y))));
+  useSocket('message:update', (m) => {
+    if (m.conversation_id !== id) return;
+    setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, ...m } : y)));
+    if (m.kind === 'deleted') {
+      setReplyTo((r) => (r?.id === m.id ? null : r));
+      setMenu((x) => (x?.m.id === m.id ? null : x));
+    }
+  });
+  useSocket('message:react', (p) => p.conversation_id === id && setMsgs((x) => x.map((y) => (y.id === p.message_id ? { ...y, reactions: p.reactions } : y))));
   useSocket('ai:thinking', (p) => p.conversation_id === id && setThinking(p.on));
   useSocket('read', (p) => p.conversation_id === id && setConv((c) => c && { ...c, reads: { ...c.reads, [p.user_id]: p.at } }));
   useSocket('typing', (p) => {
@@ -162,14 +475,48 @@ export function ChatView({ convId: id }) {
     if (Date.now() - lastTyping.current > 2000) { lastTyping.current = Date.now(); post(`/conversations/${id}/typing`).catch(() => {}); }
   };
 
-  const sendText = async (body) => {
+  const nameOf = (uid) => (uid === meId ? 'You' : conv?.members.find((u) => u.id === uid)?.display_name.split(' ')[0] || 'Someone');
+  const replyData = (m) => ({
+    id: m.id, kind: m.kind, body: String(m.body || '').slice(0, 140), sender_id: m.sender_id,
+    sender_name: m.sender_id ? (m.sender_id === meId ? self?.display_name : m.sender?.display_name) : 'Planner',
+    ...(m.data?.ref ? { ref: m.data.ref } : {}),
+  });
+
+  // Sending: the message shows at once with a clock, and the server's copy replaces it (matched by client_id).
+  // If it fails it stays, marked "Not sent", until you tap it or the phone comes back online.
+  const deliver = async (t) => {
+    setMsgs((x) => [...x.filter((y) => y.id !== t.id), { ...t, pending: true, failed: false }]);
+    try {
+      const r = await post(`/conversations/${id}/messages`, { ...t.req, client_id: t.client_id });
+      upsert(r.message);
+    } catch {
+      setMsgs((x) => x.map((y) => (y.id === t.id ? { ...y, pending: false, failed: true } : y)));
+    }
+  };
+  const deliverRef = useRef(deliver);
+  deliverRef.current = deliver;
+  useEffect(() => {
+    const retry = () => msgsRef.current.filter((m) => m.failed).forEach((m) => deliverRef.current(m));
+    window.addEventListener('online', retry);
+    return () => window.removeEventListener('online', retry);
+  }, []);
+
+  const queue = (req, local) => {
+    const cid = newId();
+    const data = { ...(local.data || {}) };
+    if (replyTo) { req = { ...req, reply_to: replyTo.id }; data.reply = replyData(replyTo); }
+    setReplyTo(null);
+    unreadMark.current = null;
+    deliver({
+      ...local, id: `tmp-${cid}`, client_id: cid, conversation_id: id, sender_id: meId, sender: self,
+      created_at: new Date().toISOString(), reactions: {}, data: Object.keys(data).length ? data : null, req,
+    });
+  };
+  const sendText = (body) => {
     body = body.trim();
     if (!body) return;
     setText('');
-    try {
-      const r = await post(`/conversations/${id}/messages`, { body });
-      setMsgs((x) => (x.some((y) => y.id === r.message.id) ? x : [...x, r.message]));
-    } catch (x) { toast({ title: 'Not sent', body: x.message }); setText(body); }
+    queue({ body }, { kind: 'text', body });
   };
   const send = (e) => { e?.preventDefault(); sendText(text); inputRef.current?.focus(); };
   // Emoji go into the text at the cursor; stickers and GIFs send at once.
@@ -181,13 +528,47 @@ export function ChatView({ convId: id }) {
     setPicker(false);
     setTimeout(() => { el?.focus(); el?.setSelectionRange(at + code.length, at + code.length); }, 250);
   };
-  const sendArt = async (kind, ref) => {
+  const sendArt = (kind, ref) => {
     setPicker(false);
-    try {
-      const r = await post(`/conversations/${id}/messages`, { kind, ref });
-      setMsgs((x) => (x.some((y) => y.id === r.message.id) ? x : [...x, r.message]));
-    } catch (x) { toast({ title: 'Not sent', body: x.message }); }
+    queue({ kind, ref }, { kind, body: kind === 'gif' ? 'GIF' : 'Sticker', data: { ref } });
   };
+
+  const startReply = (m) => {
+    setMenu(null);
+    setReplyTo(m);
+    inputRef.current?.focus();
+  };
+  const react = async (m, emoji) => {
+    setMenu(null);
+    const before = m.reactions || {};
+    const set = (r) => setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, reactions: r } : y)));
+    set(toggleReaction(before, emoji, meId));
+    navigator.vibrate?.(8);
+    try { set((await post(`/messages/${m.id}/react`, { emoji })).reactions); }
+    catch (x) { set(before); toast({ title: 'Could not react', body: x.message }); }
+  };
+  const copy = async (m) => {
+    setMenu(null);
+    toast({ title: (await copyText(m.body)) ? 'Copied' : 'Could not copy' });
+  };
+  const remove = async (m) => {
+    setMenu(null);
+    if (m.failed) { setMsgs((x) => x.filter((y) => y.id !== m.id)); return; }
+    if (replyTo?.id === m.id) setReplyTo(null);
+    setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, kind: 'deleted', body: '', data: null, reactions: {} } : y)));
+    try { await del(`/messages/${m.id}`); }
+    catch (x) { setMsgs((xs) => xs.map((y) => (y.id === m.id ? m : y))); toast({ title: 'Could not delete', body: x.message }); }
+  };
+  const jumpTo = (mid) => {
+    const el = document.getElementById(`m-${mid}`);
+    if (!el) return toast({ title: 'That message is further back' });
+    el.scrollIntoView({ block: 'center', behavior: smooth() ? 'smooth' : 'auto' });
+    el.classList.remove('flash');
+    void el.offsetWidth; // restart the highlight
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1600);
+  };
+  const openMenu = (m, el, side, first) => el && setMenu({ m, at: el.getBoundingClientRect(), side, first });
 
   const planIt = async () => {
     setAttach(false);
@@ -206,16 +587,40 @@ export function ChatView({ convId: id }) {
   };
   const openEvent = (eid) => navigate(`/event/${eid}`);
 
-  if (!conv) return <div className="chat"><div className="spinner" /></div>;
+  // Placeholder bubbles while the chat loads.
+  if (!conv) return (
+    <div className="chat">
+      <header className="chat-header">
+        <button className="back-btn" onClick={() => navigate('/')} aria-label="Back"><Icon name="left" size={26} /></button>
+        <span className="chat-who">
+          <span className="skel round" style={{ width: 38, height: 38 }} />
+          <span className="grow"><span className="skel line" style={{ width: '42%' }} /><span className="skel line sm" style={{ width: '26%' }} /></span>
+        </span>
+      </header>
+      <div className="messages-wrap">
+        <div className="messages wallpaper skel-list" aria-busy="true" aria-label="Loading messages">
+          {SKELETON.map(([side, w, h], i) => (
+            <div key={i} className={`row-msg ${side} ${i === 0 || SKELETON[i - 1][0] !== side ? 'first' : ''}`}>
+              <div className="bubble skel" style={{ width: `${w}%`, height: h }} />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="composer"><div className="input-pill"><span className="muted">Message</span></div><span className="send" style={{ opacity: 0.35 }}><Icon name="send" size={20} /></span></div>
+    </div>
+  );
+
   const planner = !!conv.is_ai;
   const others = conv.members.filter((m) => !m.me);
-  const planMembers = planner ? [me, ...friends.friends].filter(Boolean) : conv.members;
+  const planMembers = planner ? [self, ...friends.friends].filter(Boolean) : conv.members;
   const sub = planner ? (thinking ? 'thinking…' : 'finds times, books plans, reminds everyone')
     : typing ? `${conv.is_group ? `${typing.display_name.split(' ')[0]} is ` : ''}typing…`
     : conv.is_group ? others.map((m) => m.display_name.split(' ')[0]).join(', ') + ', You'
     : lastSeen(others[0]);
 
   const tickFor = (m) => {
+    if (m.pending) return <Icon name="clock" size={13} className="tick pending" />;
+    if (m.failed) return <Icon name="alert" size={15} className="tick failed" />;
     const readAll = others.length && others.every((u) => (conv.reads?.[u.id] || '') >= m.created_at);
     if (readAll) return <Icon name="ticks" size={16} className="tick read" />;
     if (others.some((u) => u.online)) return <Icon name="ticks" size={16} className="tick" />;
@@ -233,9 +638,82 @@ export function ChatView({ convId: id }) {
   const quick = planner && lastAi?.kind === 'plan' && lastAi.data?.status !== 'created'
     ? ['Make it earlier', 'Invite everyone', 'Remind me a day before'] : [];
   const nameColor = (u) => u?.color || 'var(--accent)';
+  const quoteColor = (q) => (!q.sender_id || q.sender_id === meId ? 'var(--accent)' : nameColor(conv.members.find((u) => u.id === q.sender_id)));
 
-  let lastDay = '';
-  let prevSender = null;
+  const bubble = (m, first, clone = false) => {
+    const mine = m.sender_id === meId;
+    const ai = m.kind === 'ai';
+    const reply = m.data?.reply;
+    const meta = <span className="meta">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>;
+    const who = first && !mine && (conv.is_group || (ai && !planner)) && (
+      <span className="who" style={{ color: ai ? 'var(--accent)' : nameColor(m.sender) }}>{ai ? 'Planner' : m.sender?.display_name}</span>
+    );
+    const quote = reply && <Quote q={reply} me={self} color={quoteColor(reply)} onClick={clone ? undefined : () => jumpTo(reply.id)} />;
+    if (m.kind === 'deleted') return (
+      <div className="bubble deleted">
+        <span className="text"><Icon name="block" size={15} />{mine ? 'You deleted this message' : 'This message was deleted'}</span>{meta}
+      </div>
+    );
+    if (isMedia(m.kind)) return (
+      <div className={`media-msg ${m.kind}`}>
+        {who}{quote}
+        <img src={m.kind === 'gif' ? gifUrl(m.data?.ref) : stickerUrl(m.data?.ref)} alt={m.body} draggable="false" />
+        {meta}
+      </div>
+    );
+    const big = !ai && !reply && emojiOnly(m.body);
+    return (
+      <div className={`bubble ${ai && !planner ? 'ai' : ''} ${big ? `jumbo n${big}` : ''}`}>
+        {who}{quote}
+        <span className="text">{ai ? (clone ? m.body : <Reveal text={m.body} fresh={freshIds.current.has(m.id)} />) : <RichText text={m.body} />}</span>
+        {meta}
+      </div>
+    );
+  };
+
+  const renderMsg = (m, first) => {
+    if (m.kind === 'system') return <div key={keyOf(m)} className="sys"><span>{m.body}</span></div>;
+    const isNew = initialIds.current && !initialIds.current.has(m.id);
+    if (m.kind === 'plan') return (
+      <div key={keyOf(m)} id={`m-${m.id}`} className={`row-msg in ${first ? 'first' : ''} ${isNew ? 'pop' : ''}`}>
+        <PlanCard msg={m} members={planMembers} onDone={openEvent} />
+      </div>
+    );
+    const side = m.sender_id === meId ? 'out' : 'in';
+    const live = !m.pending && m.kind !== 'deleted';
+    return (
+      <Row key={keyOf(m)} id={m.id} side={side} first={first} pop={isNew}
+        onHold={live ? (el) => openMenu(m, el, side, first) : null}
+        onSwipe={live && !m.failed ? () => startReply(m) : null}
+        onTap={m.failed ? () => deliver(m) : undefined}>
+        {bubble(m, first)}
+        {m.kind !== 'deleted' && (
+          <ReactPill r={m.reactions} meId={meId}
+            onOpen={(e) => { e.stopPropagation(); openMenu(m, e.currentTarget.closest('.row-msg')?.querySelector('.bubble, .media-msg'), side, first); }} />
+        )}
+        {m.failed && <span className="failed-note"><Icon name="alert" size={14} />Not sent. Tap to try again</span>}
+      </Row>
+    );
+  };
+
+  // Group by day so each date label sticks to the top while you scroll through that day.
+  const days = [];
+  for (const m of msgs) {
+    const d = dayKey(m.created_at);
+    if (days[days.length - 1]?.d !== d) days.push({ d, at: m.created_at, list: [] });
+    days[days.length - 1].list.push(m);
+  }
+  const mark = unreadMark.current;
+  const menuMsg = menu && (msgs.find((y) => y.id === menu.m.id) || menu.m);
+  const menuActions = (m) => (m.failed ? [
+    { label: 'Try again', icon: 'send', run: () => { setMenu(null); deliver(m); } },
+    { label: 'Delete', icon: 'trash', danger: true, run: () => remove(m) },
+  ] : [
+    { label: 'Reply', icon: 'reply', run: () => startReply(m) },
+    (m.kind === 'text' || m.kind === 'ai') && { label: 'Copy', icon: 'copy', run: () => copy(m) },
+    m.sender_id === meId && { label: 'Delete for everyone', icon: 'trash', danger: true, confirm: 'Delete this message for everyone?', run: () => remove(m) },
+  ].filter(Boolean));
+
   return (
     <div className="chat">
       <header className="chat-header">
@@ -255,62 +733,66 @@ export function ChatView({ convId: id }) {
         </>}
       </header>
 
-      <div className="messages wallpaper">
-        {planner && <div className="info-pill">Tell Planner what you want to do and who with. It picks a time you're all free, books it and reminds everyone.</div>}
-        {msgs.map((m) => {
-          const day = dayKey(m.created_at);
-          const sep = day !== lastDay ? (lastDay = day, prevSender = null, <div className="day-sep" key={`d${day}`}><span>{relDay(m.created_at)}</span></div>) : null;
-          const mine = m.sender_id === me?.id;
-          const senderKey = m.sender_id || 'ai';
-          const first = senderKey !== prevSender;
-          prevSender = m.kind === 'system' ? null : senderKey;
-          if (m.kind === 'system') return [sep, <div key={m.id} className="sys"><span>{m.body}</span></div>];
-          if (m.kind === 'plan') return [sep, <div key={m.id} className={`row-msg in ${first ? 'first' : ''} ${initialIds.current && !initialIds.current.has(m.id) ? 'pop' : ''}`}><PlanCard msg={m} members={planMembers} onDone={openEvent} /></div>];
-          const ai = m.kind === 'ai';
-          const isNew = initialIds.current && !initialIds.current.has(m.id);
-          if (m.kind === 'sticker' || m.kind === 'gif') return [sep, (
-            <div key={m.id} className={`row-msg ${mine ? 'out' : 'in'} ${first ? 'first' : ''} ${isNew ? 'pop' : ''}`}>
-              <div className={`media-msg ${m.kind}`}>
-                {first && !mine && conv.is_group && <span className="who" style={{ color: nameColor(m.sender) }}>{m.sender?.display_name}</span>}
-                <img src={m.kind === 'gif' ? gifUrl(m.data?.ref) : stickerUrl(m.data?.ref)} alt={m.body} draggable="false" />
-                <span className="meta">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>
-              </div>
-            </div>
-          )];
-          const big = !ai && emojiOnly(m.body);
-          return [sep, (
-            <div key={m.id} className={`row-msg ${mine ? 'out' : 'in'} ${first ? 'first' : ''} ${isNew ? 'pop' : ''}`}>
-              <div className={`bubble ${ai && !planner ? 'ai' : ''} ${big ? `jumbo n${big}` : ''}`}>
-                {first && !mine && (conv.is_group || (ai && !planner)) && (
-                  <span className="who" style={{ color: ai ? 'var(--accent)' : nameColor(m.sender) }}>{ai ? 'Planner' : m.sender?.display_name}</span>
-                )}
-                <span className="text">{ai ? <Reveal text={m.body} fresh={freshIds.current.has(m.id)} /> : <RichText text={m.body} />}</span>
-                <span className="meta">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>
-              </div>
-            </div>
-          )];
-        })}
-        {(thinking || typing) && (
-          <div className="row-msg in first"><div className="bubble typing-bubble"><span /><span /><span /></div></div>
+      <div className="messages-wrap">
+        <div className="messages wallpaper" ref={listRef} onScroll={onScroll}>
+          {more && <div className="older">{older && <span className="spinner sm" />}</div>}
+          {planner && !more && <div className="info-pill">Tell Planner what you want to do and who with. It picks a time you're all free, books it and reminds everyone.</div>}
+          {days.map(({ d, at, list }) => {
+            let prev = null;
+            return (
+              <section className="day" key={d}>
+                <div className="day-sep"><span>{relDay(at)}</span></div>
+                {list.flatMap((m) => {
+                  const unread = mark?.id === m.id;
+                  if (unread) prev = null;
+                  const senderKey = m.sender_id || 'ai';
+                  const first = senderKey !== prev;
+                  prev = m.kind === 'system' ? null : senderKey;
+                  const row = renderMsg(m, first);
+                  return unread ? [<div key="unread-mark" id="unread-mark" className="unread-sep"><span>{mark.n} unread message{mark.n > 1 ? 's' : ''}</span></div>, row] : [row];
+                })}
+              </section>
+            );
+          })}
+          {(thinking || typing) && (
+            <div className="row-msg in first"><div className="bubble typing-bubble"><span /><span /><span /></div></div>
+          )}
+        </div>
+        {jump && (
+          <button className="jump" onClick={() => toEnd(true)} aria-label={unseen ? `${unseen} new message${unseen > 1 ? 's' : ''}` : 'Go to latest'}>
+            <Icon name="down" size={22} />{unseen > 0 && <b>{unseen}</b>}
+          </button>
         )}
-        <div ref={endRef} />
       </div>
 
       {(starters.length > 0 || quick.length > 0) && !thinking && (
         <div className="suggest-row">{[...starters, ...quick].map((q) => <button key={q} className="suggest-chip" onClick={() => sendText(q)}>{q}</button>)}</div>
       )}
 
+      {replyTo && (
+        <div className="reply-bar">
+          <Quote q={replyData(replyTo)} me={self} color={quoteColor(replyTo)} />
+          <button type="button" className="icon-plain sm" onClick={() => setReplyTo(null)} aria-label="Cancel reply"><Icon name="x" size={20} /></button>
+        </div>
+      )}
       <form className="composer" onSubmit={send}>
         {!planner && <button type="button" className="icon-plain" onClick={() => setAttach(true)} aria-label="More"><Icon name="plus" size={26} /></button>}
         <div className="input-pill">
           <input ref={inputRef} value={text} onChange={onType} enterKeyHint="send"
-            placeholder={planner ? 'What should we plan?' : 'Message'} aria-label="Message" />
+            onKeyDown={(e) => e.key === 'Escape' && replyTo && setReplyTo(null)}
+            placeholder={replyTo ? 'Reply' : planner ? 'What should we plan?' : 'Message'} aria-label="Message" />
           <button type="button" className="icon-plain sm muted-ic" onClick={() => setPicker(true)} aria-label="Emoji, stickers and GIFs"><Icon name="smile" size={24} /></button>
           {!planner && <button type="button" className="icon-plain sm" onClick={planIt} disabled={thinking} aria-label="Plan it with Planner"><Orb size={24} state={thinking ? 'thinking' : 'idle'} /></button>}
         </div>
         <button className={`send ${text.trim() ? 'ready' : ''}`} disabled={!text.trim()} aria-label="Send"><Icon name="send" size={20} /></button>
       </form>
 
+      {menuMsg && menuMsg.kind !== 'deleted' && (
+        <MessageMenu at={menu.at} side={menu.side} canReact={!menuMsg.failed} reactions={menuMsg.reactions} meId={meId}
+          names={(ids) => ids.map(nameOf).join(', ')} onReact={(e) => react(menuMsg, e)} actions={menuActions(menuMsg)} onClose={() => setMenu(null)}>
+          <div className={`row-msg ${menu.side} ${menu.first ? 'first' : ''}`}>{bubble(menuMsg, menu.first, true)}</div>
+        </MessageMenu>
+      )}
       <ArtPicker open={picker} onClose={() => setPicker(false)} onEmoji={addEmoji} onSend={sendArt} />
       <Sheet open={attach} onClose={() => setAttach(false)}>
         <div className="attach-grid">

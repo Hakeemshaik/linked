@@ -100,6 +100,11 @@ export function AppProvider({ children, navigate }) {
     });
     s.on('friends:changed', loadFriends);
     s.on('notification', (n) => {
+      // A reaction to your message: just the alert, it isn't an unread message.
+      if (n.kind === 'reaction') {
+        if (window.location.pathname !== n.url) toast({ title: n.title, body: n.body, url: n.url, user: n.data?.from });
+        return;
+      }
       if (n.kind === 'message') {
         const path = window.location.pathname;
         if (path === n.url) return; // already looking at that chat

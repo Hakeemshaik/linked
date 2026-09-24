@@ -8,6 +8,11 @@ A private messenger for you and your friends that plans for you. It installs fro
 - **Calls**: quick-call your friends, see call history, missed calls in red, tap to call back.
 - Your avatar (top left of Chats) opens **Settings**: your status (Available, Busy, At work, Away, Invisible, plus a short line), friends, all plans, notifications, sign out.
 
+**Chatting**
+- Messages appear the moment you tap send, with a clock until they're delivered. Without signal they stay marked **Not sent** and go out when you tap them or the phone is back online.
+- Hold a message to react (one of the app's emoji, one each), **Reply**, **Copy** or **Delete for everyone** (your own messages). Swipe a message right to reply. Tap a quote to jump to the original.
+- A chat opens where you left off, under an "unread messages" line. Scroll up for older messages; when you're scrolled up, a button takes you to the latest and counts what came in.
+
 **Getting your friends in**
 - Sign up (you need the `REGISTRATION_CODE` you set). In Chats, tap **Share invite link**, or go to Settings, Friends, **Invite link**.
 - Your friend opens the link, creates an account (no code needed) and lands straight in a chat with you. You're friends automatically.
@@ -26,6 +31,8 @@ A private messenger for you and your friends that plans for you. It installs fro
 **Calls**
 - A call rings for 45 seconds. While it rings, the notification is sent again every 6 seconds, so a locked phone keeps alerting. The caller sees "Ringing…", then "declined", "No answer" or "Call ended", and the friend gets "Missed video call" if they didn't pick up.
 - Leaving the call screen (or pressing back) keeps the call going as a small pill at the top, with a live timer. Tap it to go back.
+- In a video call, tap your small video to swap it with theirs, and drag it to any corner.
+- Calls on mobile data need a relay: see section 4.
 - What a home-screen web app can't do: use the iPhone's real call screen or Dynamic Island, or play a custom ringtone while the phone is locked. Locked phones use the normal notification sound and vibration, and Silent mode or Focus can mute them.
 
 **Updates**
@@ -57,6 +64,7 @@ Everything runs on Vercel except the Planner model, which stays on your PC (step
    **LM Studio or ngrok instead:** LM Studio listens on port 1234, so also set `OLLAMA_URL=http://127.0.0.1:1234` in `.env` before `npm run gate`. With ngrok, run `ngrok http 11435` and use its `https://…ngrok-free.dev/v1` address. Always tunnel the gate (port 11435), never the model's own port: otherwise anyone who finds the address can use your model. `LLM_MODEL` must be the model name LM Studio shows (for example `qwen2.5-7b-instruct`).
 6. **Sign-up code.** Add `REGISTRATION_CODE` in Vercel. People need it to sign up without an invite link.
 7. **Deploy.** Vercel deploys production from the repo's default branch, so merge this code into it, or set **Settings, Environments, Production, Branch** to the branch you want live. Reminders call back to the production address, so production has to be live. Then open `https://<your-app>.vercel.app/api/health`. It should show `postgres: ok`, `realtime: pusher` and `qstash + daily sweep`.
+8. **Calls on mobile data.** Add a TURN relay (section 4). Without one, calls only connect when both phones allow direct connections.
 
 The first visit creates the push keys and the login secret and stores them in the database. Don't delete the `kv` table: if the push keys change, everyone has to turn notifications on again.
 
@@ -77,17 +85,30 @@ Phones need HTTPS, so share it with `tailscale funnel --bg 8080`. The PC has to 
 
 ## 3. Install on phones
 
-**iPhone (iOS 16.4+)**: open the link in **Safari**, tap Share, then **Add to Home Screen**. Open Linkup from the home screen, sign up, then go to **Settings, Notifications** and tap **Turn on**. On iPhone, push only works from the home-screen app, not from a Safari tab.
+**iPhone (iOS 16.4+)**: open the link in **Safari**, tap Share, then **Add to Home Screen**. Open Linkup from the home screen and sign up. On iPhone, push only works from the home-screen app, not from a Safari tab (in Safari, the app shows these steps instead).
 
-**Android**: open the link in **Chrome**, tap **Install app** (or ⋮, then Add to Home screen). Then go to **Settings, Notifications** and tap **Turn on**.
+**Android**: open the link in **Chrome**, tap **Install app** (or ⋮, then Add to Home screen).
 
-Tap **Send test** there to confirm, then lock the phone and check the notification shows up.
+When the app opens, it asks to turn on notifications: tap **Turn on notifications**, then **Allow**. If you tap **Not now**, it asks again in a few days, and you can always do it in **Settings, Notifications**. The **Get set up** card on Chats shows what's left (profile picture, notifications, inviting a friend).
+
+Tap **Send test** in Settings, Notifications to confirm, then lock the phone and check the notification shows up.
 
 Easiest: share your invite link (Chats, Share invite link). Friends who open it sign up without a code and are connected to you straight away. People can also sign up with the `REGISTRATION_CODE` and add each other by username in **Settings, Friends**.
 
 ## 4. Video calls on mobile data
 
-Calls connect peer-to-peer. That works on most Wi-Fi, but some mobile networks block direct connections, and then the call gets stuck on "connecting". To fix that, add a TURN relay in the environment variables (`TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD`). You can use a hosted TURN service, or self-host `coturn` on a VPS with UDP 3478 open.
+Calls go straight from phone to phone. On most Wi-Fi that just works, but many mobile networks block direct connections, and then a call sits on "Connecting…". A TURN relay fixes that by passing the call through a server when a direct connection fails. Until one is set, `/api/health` shows `calls: direct only`.
+
+**Cloudflare (free tier):**
+1. In the Cloudflare dashboard, open **Realtime**, then **TURN Server**, and create a TURN key.
+2. In Vercel, add `CLOUDFLARE_TURN_KEY_ID` (the key's ID) and `CLOUDFLARE_TURN_API_TOKEN` (its API token).
+3. Redeploy, then open `/api/health`: it should show `calls: relay: cloudflare`.
+
+The server asks Cloudflare for short-lived relay logins and only gives them to signed-in people when a call starts, so the token never reaches a phone.
+
+**Other options:** a provider with a URL that returns ICE servers as JSON (for example Metered): set `TURN_API_URL`. Or a fixed TURN server, such as your own `coturn` on a VPS with UDP 3478 open: set `TURN_URL`, `TURN_USERNAME` and `TURN_PASSWORD`.
+
+Calls also survive a dropped live event: set-up messages are kept on the server and the call screen fetches any it missed, so a call can't hang on "is joining".
 
 ---
 

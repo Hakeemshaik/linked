@@ -23,12 +23,41 @@ const COLORS = ['#7c5cff', '#ff5c8a', '#22c7a9', '#ffb020', '#3fa7ff', '#ff7a45'
 const STATUSES = ['available', 'busy', 'work', 'away', 'invisible'];
 const TYPES = ['trip', 'hangout', 'meeting', 'call', 'event'];
 
+// ---------- call relay (TURN) ----------
+// Phones on mobile data or strict Wi-Fi often can't reach each other directly; a TURN relay carries the call then.
+// Set one of: CLOUDFLARE_TURN_KEY_ID + CLOUDFLARE_TURN_API_TOKEN (free tier), TURN_API_URL (returns ICE servers,
+// e.g. Metered), or TURN_URL + TURN_USERNAME + TURN_PASSWORD.
+const STUN = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
+const E = process.env;
+const relayKind = E.CLOUDFLARE_TURN_KEY_ID && E.CLOUDFLARE_TURN_API_TOKEN ? 'cloudflare' : E.TURN_API_URL ? 'api' : E.TURN_URL ? 'static' : null;
+let relayCache = { at: 0, servers: [] };
+const noPort53 = (s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53(\?|$)/.test(u)) }); // browsers stall on port 53
+async function relayServers() {
+  if (relayKind === 'static') return [{ urls: E.TURN_URL.split(',').map((u) => u.trim()), username: E.TURN_USERNAME, credential: E.TURN_PASSWORD }];
+  if (!relayKind || Date.now() - relayCache.at < 3 * 3600e3) return relayCache.servers;
+  let list;
+  if (relayKind === 'cloudflare') {
+    const call = (path) => fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${E.CLOUDFLARE_TURN_KEY_ID}/credentials/${path}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${E.CLOUDFLARE_TURN_API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl: 86400 }), signal: AbortSignal.timeout(6000),
+    });
+    let r = await call('generate-ice-servers');
+    if (r.status === 404) r = await call('generate');
+    if (!r.ok) throw new Error(`Cloudflare TURN ${r.status}: ${(await r.text()).slice(0, 120)}`);
+    list = [].concat((await r.json()).iceServers || []);
+  } else {
+    const r = await fetch(E.TURN_API_URL, { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error(`TURN_API_URL ${r.status}`);
+    const j = await r.json();
+    list = [].concat(Array.isArray(j) ? j : j.iceServers || []);
+  }
+  relayCache = { at: Date.now(), servers: list.filter((x) => x?.urls).map(noPort53).filter((x) => x.urls.length) };
+  return relayCache.servers;
+}
+
 // ---------- config ----------
 api.get('/config', wrap(async (req, res) => {
-  const ice = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
-  if (process.env.TURN_URL) {
-    ice.push({ urls: process.env.TURN_URL.split(','), username: process.env.TURN_USERNAME, credential: process.env.TURN_PASSWORD });
-  }
+  const ice = STUN; // relay (TURN) details are only handed out to signed-in people, at call time: /calls/ice
   res.json({
     appName: process.env.APP_NAME || 'Linkup',
     vapidPublicKey: (await vapid()).publicKey,
@@ -48,6 +77,7 @@ api.get('/health', wrap(async (req, res) => {
     ok: database === 'ok' && realtimeKind !== 'none',
     database: `${dbKind === 'postgres' ? 'postgres' : 'local (embedded)'}: ${database}`,
     realtime: { pusher: 'pusher', sse: 'local stream', none: 'missing: set the PUSHER_* variables' }[realtimeKind],
+    calls: relayKind ? `relay: ${relayKind}` : 'direct only: add a TURN relay (see README) or calls on mobile data may not connect',
     reminders: { qstash: 'qstash + daily sweep', timer: 'local timer', 'cron-only': 'daily sweep only: set QSTASH_TOKEN for on-time reminders' }[remindersKind],
     planner: aiMisconfigured ? 'not set: add LLM_BASE_URL (your tunnel URL ending in /v1) and redeploy' : aiInfo.model,
   });
@@ -571,9 +601,10 @@ api.post('/conversations', wrap(async (req, res) => {
 api.get('/conversations/:id/messages', wrap(async (req, res) => {
   if (!(await isMember(req.params.id, req.user.id))) return bad(res, 'Not found', 404);
   const before = req.query.before || '9999';
-  const rows = (await q('SELECT * FROM messages WHERE conversation_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT 60', [req.params.id, before])).reverse();
-  const users = await usersById(rows.map((m) => m.sender_id));
-  res.json({ messages: rows.map((m) => messagePayload(parseRow(m), users)) });
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 60));
+  const rows = (await q('SELECT * FROM messages WHERE conversation_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?', [req.params.id, before, limit])).reverse();
+  const [users, reacts] = await Promise.all([usersById(rows.map((m) => m.sender_id)), reactionsFor(rows.map((m) => m.id))]);
+  res.json({ messages: rows.map((m) => ({ ...messagePayload(parseRow(m), users), reactions: reacts.get(m.id) || {} })), more: rows.length === limit });
 }));
 
 api.post('/conversations/:id/read', wrap(async (req, res) => {
@@ -595,14 +626,27 @@ api.post('/conversations/:id/typing', wrap(async (req, res) => {
 const EMOJI_TEXT = { love: '💜', lol: '😂', hype: '🔥', omw: '🏃', braai: '🍖', cheers: '🍻', free: '✅', meh: '😒', sleepy: '😴', party: '🎉' };
 const lockScreenText = (t) => t.replace(/:([a-z]+):/g, (m, id) => EMOJI_TEXT[id] || m);
 
-async function postMessage(convId, sender, kind, body, data = null) {
+/** { messageId: { emoji: [userId, ...] } } for these messages. */
+async function reactionsFor(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  for (const r of await q('SELECT message_id, user_id, emoji FROM reactions WHERE message_id = ANY(?) ORDER BY created_at', [ids])) {
+    const m = out.get(r.message_id) || {};
+    (m[r.emoji] ||= []).push(r.user_id);
+    out.set(r.message_id, m);
+  }
+  return out;
+}
+
+async function postMessage(convId, sender, kind, body, data = null, clientId = null) {
   const mid = id();
   const ts = now();
   await run('INSERT INTO messages (id, conversation_id, sender_id, kind, body, data, created_at) VALUES (?,?,?,?,?,?,?)',
     [mid, convId, sender?.id || null, kind, body, data ? JSON.stringify(data) : null, ts]);
   await run('UPDATE conversations SET updated_at = ? WHERE id = ?', [ts, convId]);
   if (sender) await run('UPDATE conversation_members SET last_read_at = ? WHERE conversation_id = ? AND user_id = ?', [ts, convId, sender.id]);
-  const msg = { id: mid, conversation_id: convId, sender_id: sender?.id || null, kind, body, data, created_at: ts, sender: sender ? publicUser(sender) : null };
+  // client_id lets the sender's phone swap its instant "sending" bubble for the real one.
+  const msg = { id: mid, conversation_id: convId, sender_id: sender?.id || null, kind, body, data, created_at: ts, sender: sender ? publicUser(sender) : null, reactions: {}, ...(clientId ? { client_id: clientId } : {}) };
   const [members, conv] = await Promise.all([memberIds(convId), one('SELECT * FROM conversations WHERE id = ?', [convId])]);
 
   const from = sender ? sender.display_name : 'Planner';
@@ -657,13 +701,23 @@ api.post('/conversations/:id/messages', wrap(async (req, res) => {
   if (!(await isMember(convId, req.user.id))) return bad(res, 'Not found', 404);
   // Stickers and GIFs are the app's own art, sent by id.
   const kind = ['sticker', 'gif'].includes(req.body?.kind) ? req.body.kind : 'text';
+  const clientId = /^[a-z0-9]{4,40}$/i.test(req.body?.client_id || '') ? req.body.client_id : null;
+  // Replying: keep a short copy of the message being answered, so the quote survives edits and deletes.
+  let reply = null;
+  if (req.body?.reply_to) {
+    const o = parseRow(await one('SELECT m.id, m.kind, m.body, m.data, m.sender_id, u.display_name FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.id = ? AND m.conversation_id = ?', [req.body.reply_to, convId]));
+    if (o && o.kind !== 'deleted') {
+      reply = { id: o.id, kind: o.kind, body: String(o.body || '').slice(0, 140), sender_id: o.sender_id, sender_name: o.sender_id ? o.display_name : 'Planner' };
+      if (o.data?.ref) reply.ref = o.data.ref;
+    }
+  }
   if (kind !== 'text') {
     if (!ART_ID.test(req.body?.ref || '')) return bad(res, 'Unknown sticker');
-    return res.json({ message: await postMessage(convId, req.user, kind, kind === 'gif' ? 'GIF' : 'Sticker', { ref: req.body.ref }) });
+    return res.json({ message: await postMessage(convId, req.user, kind, kind === 'gif' ? 'GIF' : 'Sticker', { ref: req.body.ref, ...(reply ? { reply } : {}) }, clientId) });
   }
   const body = String(req.body?.body || '').trim().slice(0, 4000);
   if (!body) return bad(res, 'Empty message');
-  const msg = await postMessage(convId, req.user, 'text', body);
+  const msg = await postMessage(convId, req.user, 'text', body, reply ? { reply } : null, clientId);
   const conv = await one('SELECT is_ai FROM conversations WHERE id = ?', [convId]);
   if (conv.is_ai || /(^|\s)@ai\b/i.test(body)) background(aiRespond(convId, req.user.id, 'reply', body.replace(/@ai\b/gi, '').trim()));
   res.json({ message: msg });
@@ -674,6 +728,44 @@ api.post('/conversations/:id/plan', wrap(async (req, res) => {
   if (await aiBusy(req.params.id)) return bad(res, 'Planner is already working on it', 409);
   background(aiRespond(req.params.id, req.user.id, 'plan'));
   res.json({ started: true });
+}));
+
+// React to a message with one of the app's emoji. One reaction each: picking another swaps it, the same one takes it back.
+api.post('/messages/:id/react', wrap(async (req, res) => {
+  const m = await one('SELECT id, conversation_id, sender_id, kind, body FROM messages WHERE id = ?', [req.params.id]);
+  if (!m || !(await isMember(m.conversation_id, req.user.id))) return bad(res, 'Not found', 404);
+  if (m.kind === 'deleted' || m.kind === 'system') return bad(res, "You can't react to this message");
+  const emoji = String(req.body?.emoji || '');
+  if (!Object.hasOwn(EMOJI_TEXT, emoji)) return bad(res, 'Unknown emoji');
+  const removed = await run('DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?', [m.id, req.user.id, emoji]);
+  if (!removed) {
+    await run('DELETE FROM reactions WHERE message_id = ? AND user_id = ?', [m.id, req.user.id]);
+    await run('INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING', [m.id, req.user.id, emoji, now()]);
+    // Tell the author, like any other message (one notification per message, replaced if they change it).
+    if (m.sender_id && m.sender_id !== req.user.id) {
+      const conv = await one('SELECT name, is_group FROM conversations WHERE id = ?', [m.conversation_id]);
+      const what = m.kind === 'sticker' ? 'your sticker' : m.kind === 'gif' ? 'your GIF' : `"${lockScreenText(m.body).slice(0, 80)}"`;
+      background(notify([m.sender_id], {
+        kind: 'reaction', title: conv?.is_group ? `${req.user.display_name} in ${conv.name || 'group chat'}` : req.user.display_name,
+        body: `Reacted ${EMOJI_TEXT[emoji]} to ${what}`, url: `/chat/${m.conversation_id}`, tag: `react-${m.id}`,
+        data: { conversation_id: m.conversation_id, from: publicUser(req.user) }, store: false,
+      }));
+    }
+  }
+  const reactions = (await reactionsFor([m.id])).get(m.id) || {};
+  await emitToUsers(await memberIds(m.conversation_id), 'message:react', { conversation_id: m.conversation_id, message_id: m.id, reactions });
+  res.json({ reactions });
+}));
+
+// Delete for everyone: only the sender, and the bubble stays as "deleted".
+api.delete('/messages/:id', wrap(async (req, res) => {
+  const m = await one('SELECT * FROM messages WHERE id = ?', [req.params.id]);
+  if (!m || m.sender_id !== req.user.id) return bad(res, 'You can only delete your own messages', 403);
+  await run(`UPDATE messages SET kind = 'deleted', body = '', data = NULL WHERE id = ?`, [m.id]);
+  await run('DELETE FROM reactions WHERE message_id = ?', [m.id]);
+  const updated = { ...m, kind: 'deleted', body: '', data: null, reactions: {}, sender: publicUser(req.user) };
+  await emitToUsers(await memberIds(m.conversation_id), 'message:update', updated);
+  res.json({ message: updated });
 }));
 
 // Confirm (optionally edited) plan card -> real event + invites.
@@ -852,16 +944,19 @@ api.post('/calls/:room/join', wrap(async (req, res) => {
   // Nobody here and nobody left to ring or rejoin: the call is over.
   if (!existing.length && invites.length && !invites.some((i) => i.status === 'pending' || i.status === 'accepted')) return bad(res, 'This call has ended', 410);
   const peerId = id();
-  await run('INSERT INTO call_peers (peer_id, room, user_id, seen_at) VALUES (?, ?, ?, ?)', [peerId, room, req.user.id, now()]);
+  const joinedAt = now();
+  await run('DELETE FROM call_signals WHERE created_at < ?', [new Date(Date.now() - 10 * 60000).toISOString()]);
+  await run('INSERT INTO call_peers (peer_id, room, user_id, seen_at, joined_at) VALUES (?, ?, ?, ?, ?)', [peerId, room, req.user.id, joinedAt, joinedAt]);
   const users = await usersById(existing.map((p) => p.user_id));
   const user = publicUser(req.user);
-  await emitToUsers(existing.map((p) => p.user_id), 'call:peer-joined', { room, peerId, user });
+  await emitToUsers(existing.map((p) => p.user_id), 'call:peer-joined', { room, peerId, user, joined_at: joinedAt });
   // The caller also gets who they're ringing, so their screen can show "declined" or "no answer".
   const mine = invites.filter((i) => i.from_id === req.user.id);
   const callees = await usersById(mine.map((i) => i.to_id));
   res.json({
     self: peerId,
-    peers: existing.map((p) => ({ peerId: p.peer_id, user: publicUser(users.get(p.user_id)) })),
+    joined_at: joinedAt,
+    peers: existing.map((p) => ({ peerId: p.peer_id, user: publicUser(users.get(p.user_id)), joined_at: p.joined_at || p.seen_at })),
     ringing: mine.map((i) => ({ invite_id: i.id, user: publicUser(callees.get(i.to_id)), status: i.status, created_at: i.created_at })),
     ring_ms: RING_MS,
   });
@@ -871,8 +966,11 @@ api.post('/calls/:room/signal', wrap(async (req, res) => {
   const me = await ownPeer(req);
   const to = await one('SELECT * FROM call_peers WHERE peer_id = ? AND room = ?', [req.body?.to || '', req.params.room]);
   if (!me || !to) return bad(res, 'Not in this call', 404);
-  await emitToUser(to.user_id, 'call:signal', { room: req.params.room, from: me.peer_id, to: to.peer_id, data: req.body.data });
-  res.json({ ok: true });
+  // Kept in the DB as well as sent live: the other phone also collects it with /sync if the live event goes missing.
+  const row = await one('INSERT INTO call_signals (room, to_peer, from_peer, data, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id',
+    [req.params.room, to.peer_id, me.peer_id, JSON.stringify(req.body.data ?? null), now()]);
+  await emitToUser(to.user_id, 'call:signal', { room: req.params.room, from: me.peer_id, to: to.peer_id, data: req.body.data, seq: row.id });
+  res.json({ ok: true, seq: row.id });
 }));
 
 api.post('/calls/:room/media', wrap(async (req, res) => {
@@ -883,6 +981,32 @@ api.post('/calls/:room/media', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Relay (TURN) details for this call. Fetched when a call starts.
+api.get('/calls/ice', wrap(async (req, res) => {
+  let relay = [];
+  try { relay = await relayServers(); } catch (e) { console.warn('[turn]', e.message); }
+  res.json({ iceServers: [...STUN, ...relay], relay: relay.length > 0, policy: E.CALL_FORCE_RELAY === 'true' ? 'relay' : 'all' });
+}));
+
+// Every second or two while connecting (every ten once connected): who's in the call, and any set-up
+// messages for this phone that the live channel didn't deliver. Also keeps this phone marked as present.
+api.get('/calls/:room/sync', wrap(async (req, res) => {
+  const { room } = req.params;
+  const peer = String(req.query.peer || '');
+  const n = await run('UPDATE call_peers SET seen_at = ? WHERE peer_id = ? AND room = ? AND user_id = ?', [now(), peer, room, req.user.id]);
+  if (!n) return res.json({ gone: true });
+  await run('DELETE FROM call_peers WHERE room = ? AND seen_at < ?', [room, new Date(Date.now() - PEER_STALE_MS).toISOString()]);
+  const [peers, signals] = await Promise.all([
+    q('SELECT * FROM call_peers WHERE room = ? AND peer_id != ?', [room, peer]),
+    q('SELECT id, from_peer, data FROM call_signals WHERE to_peer = ? AND id > ? ORDER BY id', [peer, Number(req.query.after) || 0]),
+  ]);
+  const users = await usersById(peers.map((p) => p.user_id));
+  res.json({
+    peers: peers.map((p) => ({ peerId: p.peer_id, user: publicUser(users.get(p.user_id)), joined_at: p.joined_at || p.seen_at })),
+    signals: signals.map((x) => ({ seq: x.id, from: x.from_peer, data: JSON.parse(x.data) })),
+  });
+}));
+
 api.post('/calls/:room/ping', wrap(async (req, res) => {
   const n = await run('UPDATE call_peers SET seen_at = ? WHERE peer_id = ? AND room = ? AND user_id = ?', [now(), req.body?.from || '', req.params.room, req.user.id]);
   res.json({ ok: !!n });
@@ -891,6 +1015,7 @@ api.post('/calls/:room/ping', wrap(async (req, res) => {
 api.post('/calls/:room/leave', wrap(async (req, res) => {
   const me = await ownPeer(req);
   if (me) await run('DELETE FROM call_peers WHERE peer_id = ?', [me.peer_id]);
+  if (me) await run('DELETE FROM call_signals WHERE to_peer = ? OR from_peer = ?', [me.peer_id, me.peer_id]);
   const others = await q('SELECT * FROM call_peers WHERE room = ?', [req.params.room]);
   // Hanging up before anyone answered (or as the last one in) stops the ringing on their phones.
   if (!others.length) await cancelRinging(req.user, req.params.room);

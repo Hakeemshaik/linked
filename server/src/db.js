@@ -10,7 +10,7 @@ export const DATA_DIR = process.env.DATA_DIR || path.join(SERVER_DIR, 'data');
 export const dbKind = URL ? 'postgres' : 'local';
 
 const NOW = `(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`;
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
@@ -147,6 +147,24 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_code TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite_code ON users(invite_code);
 -- v3: a chosen profile picture (one of the app's own set, by id).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
+-- v4: call set-up messages are kept until read, so a dropped live event can't stall a call.
+ALTER TABLE call_peers ADD COLUMN IF NOT EXISTS joined_at TEXT;
+CREATE TABLE IF NOT EXISTS call_signals (
+  id SERIAL PRIMARY KEY,
+  room TEXT NOT NULL,
+  to_peer TEXT NOT NULL,
+  from_peer TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_call_signals_to ON call_signals(to_peer, id);
+CREATE TABLE IF NOT EXISTS reactions (
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (message_id, user_id, emoji)
+);
 `;
 
 let driverP = null;

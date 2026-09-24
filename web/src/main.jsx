@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, useNa
 import { AppProvider, useApp } from './lib/store.jsx';
 import { TabBar, Toasts, Orb } from './components/ui.jsx';
 import UpdatePrompt from './components/UpdatePrompt.jsx';
+import PushPrompt from './components/PushPrompt.jsx';
 import { post } from './lib/api.js';
 import IncomingInvite from './components/IncomingInvite.jsx';
 import Login from './pages/Login.jsx';
@@ -107,6 +108,7 @@ function Shell() {
       <Toasts />
       <IncomingInvite />
       <UpdatePrompt />
+      <PushPrompt />
     </div>
   );
 }

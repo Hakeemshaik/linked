@@ -5,6 +5,7 @@ import { Avatar, Header, Sheet, Empty, Icon, Orb } from '../components/ui.jsx';
 import { fmtTime, dayKey, addDays } from '../lib/dates.js';
 import { shareInvite } from '../lib/share.js';
 import RichText from '../components/RichText.jsx';
+import SetupCard from '../components/SetupCard.jsx';
 
 function when(iso) {
   if (!iso) return '';
@@ -30,6 +31,7 @@ export default function Chats() {
   const load = () => get('/conversations').then((r) => setConvs(r.conversations)).catch(() => setConvs([]));
   useEffect(() => { load(); }, []);
   useSocket('message', load);
+  useSocket('message:update', load);
   useSocket('read', load);
   useSocket('conversations:changed', load);
   useSocket('presence', load);
@@ -64,6 +66,7 @@ export default function Chats() {
     if (!m) return c.is_group ? 'Group created' : 'Say hi';
     const mine = m.sender_id === me?.id;
     const others = c.members.filter((u) => !u.me);
+    if (m.kind === 'deleted') return <span className="deleted-line"><Icon name="block" size={15} />{mine ? 'You deleted this message' : 'This message was deleted'}</span>;
     const read = mine && others.length && others.every((u) => (c.reads?.[u.id] || '') >= m.created_at);
     const body = m.kind === 'plan' ? `Plan: ${m.body}` : m.body;
     return (
@@ -84,6 +87,7 @@ export default function Chats() {
         right={<button className="icon-plain accent" onClick={() => setNewOpen(true)} aria-label="New chat"><Icon name="edit" size={24} /></button>}
       />
 
+      <SetupCard />
       <label className="search">
         <Icon name="search" size={18} />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search" aria-label="Search chats" />

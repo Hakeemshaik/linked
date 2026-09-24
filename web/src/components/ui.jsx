@@ -41,6 +41,11 @@ const P = {
   more: <><circle cx="12" cy="5.5" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="12" cy="18.5" r="1.2" /></>,
   smile: <><circle cx="12" cy="12" r="9" /><path d="M8.3 14.2c.9 1.3 2.2 2 3.7 2s2.8-.7 3.7-2" /><path d="M9 9.6h.01M15 9.6h.01" strokeWidth="2.6" /></>,
   userPlus: <><circle cx="9" cy="8.5" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0M19 8v6M16 11h6" /></>,
+  reply: <path d="M9.5 6.5 4 12l5.5 5.5M4.5 12H14a6 6 0 0 1 6 6v.5" />,
+  copy: <><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.5" /><path d="M15.5 8.5V6.5A2.5 2.5 0 0 0 13 4H6.5A2.5 2.5 0 0 0 4 6.5V13a2.5 2.5 0 0 0 2.5 2.5h2" /></>,
+  trash: <><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l.9 11.6A2 2 0 0 0 9.4 20.5h5.2a2 2 0 0 0 2-1.9L17.5 7M10 11v5.5M14 11v5.5" /></>,
+  alert: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.8v4.9M12 16.2h.01" /></>,
+  share: <><path d="M12 14V3.5M8 7.5l4-4 4 4" /><path d="M8.5 10H7a2.5 2.5 0 0 0-2.5 2.5V18A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5v-5.5A2.5 2.5 0 0 0 17 10h-1.5" /></>,
 };
 export function Icon({ name, size = 22, className = '' }) {
   return (
