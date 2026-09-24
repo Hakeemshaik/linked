@@ -12,18 +12,20 @@ export const setToken = (t) => {
 };
 
 export async function api(path, { method = 'GET', body, keepalive } = {}) {
+  const sent = getToken();
   const res = await fetch(`${API_BASE}/api${path}`, {
     method,
     keepalive,
     headers: {
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+      ...(sent ? { Authorization: `Bearer ${sent}` } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   let data = {};
   try { data = await res.json(); } catch { /* empty */ }
-  if (res.status === 401 && path !== '/auth/login') {
+  // A signed-out session (logged out from another device, or password changed there) lands back on the sign-in screen.
+  if (res.status === 401 && sent && !path.startsWith('/auth/')) {
     setToken(null);
     window.dispatchEvent(new Event('linkup:logout'));
   }

@@ -34,7 +34,7 @@ export default function Plans() {
 
   return (
     <>
-      <Header back="/settings" title="Plans" right={<button className="icon-plain accent" onClick={() => navigate('/plans/new')} aria-label="New plan"><Icon name="plus" size={26} /></button>} />
+      <Header back="/you" title="Plans" right={<button className="icon-plain accent" onClick={() => navigate('/plans/new')} aria-label="New plan"><Icon name="plus" size={26} /></button>} />
       {events && upcoming.length === 0 && <Empty art="plans" title="No plans yet">Create one, or chat with friends and tap “Plan it”.</Empty>}
       {upcoming.length > 0 && <div className="group-list">{upcoming.map((e) => <Row key={e.id} e={e} />)}</div>}
       {past.length > 0 && <><h2 className="list-label">Recent</h2><div className="group-list">{past.map((e) => <Row key={e.id} e={e} />)}</div></>}

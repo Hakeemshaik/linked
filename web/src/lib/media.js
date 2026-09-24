@@ -42,10 +42,10 @@ export async function prepareImage(file) {
 }
 
 /** Upload a file for a chat. Reports progress (0 to 1) and resolves to { id, url, type }. */
-export function uploadMedia(convId, blob, onProgress) {
+export function uploadMedia(convId, blob, onProgress, name) {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    x.open('POST', `${API_BASE}/api/media?conversation_id=${encodeURIComponent(convId)}`);
+    x.open('POST', `${API_BASE}/api/media?conversation_id=${encodeURIComponent(convId)}${name ? `&name=${encodeURIComponent(name)}` : ''}`);
     const token = getToken();
     if (token) x.setRequestHeader('Authorization', `Bearer ${token}`);
     x.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');

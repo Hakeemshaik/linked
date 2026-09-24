@@ -397,7 +397,7 @@ api.get('/availability', wrap(async (req, res) => {
   const mine = new Set((await q('SELECT event_id FROM event_members WHERE user_id = ?', [req.user.id])).map((r) => r.event_id));
   // Friends' events I'm not part of show up only as "busy", no details.
   const events = evRows.map((e) => mine.has(e.id)
-    ? { id: e.id, user_id: e.member_id, title: e.title, type: e.type, start_at: e.start_at, end_at: e.end_at, rsvp: e.rsvp, visible: true }
+    ? { id: e.id, user_id: e.member_id, title: e.title, type: e.type, location: e.location || null, start_at: e.start_at, end_at: e.end_at, rsvp: e.rsvp, visible: true }
     : { id: null, user_id: e.member_id, title: 'Busy', type: 'private', start_at: e.start_at, end_at: e.end_at, visible: false });
   res.json({ users, blocks, events });
 }));
@@ -623,7 +623,9 @@ async function convSummaries(convs, uid) {
     const myPrefs = prefsOf(mine);
     const members = rows.map((u) => (u.id === uid ? { ...publicUser(u), me: true, role: u.member_role } : { ...presenceOf(u), role: u.member_role, blocked: blocked.has(u.id) }));
     const others = members.filter((m) => !m.me);
-    const title = c.is_ai ? 'Planner' : c.name || others.map((m) => m.display_name).join(', ') || 'Just you';
+    const community = c.community_id ? communities.get(c.community_id) || null : null;
+    // A community's Announcements chat goes by the community's name.
+    const title = c.is_ai ? 'Planner' : c.kind === 'announcements' && community ? community.name : c.name || others.map((m) => m.display_name).join(', ') || 'Just you';
     // Read receipts: someone who turned them off doesn't share theirs, and sees nobody else's.
     const reads = Object.fromEntries(rows.filter((r) => r.id === uid || (myPrefs.read_receipts && prefsOf(r).read_receipts)).map((r) => [r.id, r.last_read_at]));
     const muted = !!mine.muted_until && mine.muted_until > t;
@@ -631,7 +633,7 @@ async function convSummaries(convs, uid) {
       ...c, title, members, reads, last_message: lasts.get(c.id) || null, unread: unread.get(c.id) || 0,
       muted, muted_until: muted ? mine.muted_until : null, archived: !!mine.archived, pinned_at: mine.pinned_at || null, favorite: !!mine.favorite,
       marked_unread: !!mine.marked_unread, theme: mine.theme || null, hidden: !!mine.hidden, cleared_at: mine.cleared_at || null, my_role: mine.member_role || null,
-      community: c.community_id ? communities.get(c.community_id) || null : null,
+      community, avatar: c.avatar || (c.kind === 'announcements' ? community?.avatar : null) || null,
     };
   });
 }
@@ -755,8 +757,10 @@ async function postMessage(convId, sender, kind, body, data = null, clientId = n
   const [members, conv] = await Promise.all([memberIds(convId), one('SELECT * FROM conversations WHERE id = ?', [convId])]);
 
   const from = sender ? sender.display_name : 'Planner';
-  let title = conv.is_group ? `${from} in ${conv.name || 'group chat'}` : from;
+  // Like WhatsApp: a chat's notification is titled with the chat, a group's lines say who wrote them.
+  let title = conv.is_group ? conv.name || 'Group chat' : from;
   let text = messageText(kind, body, data);
+  if (conv.is_group && kind !== 'plan') text = `${from.split(' ')[0]}: ${text}`;
   if (kind === 'plan' && data?.plan) {
     const p = data.plan;
     title = `Planner suggested: ${p.title}`;
@@ -766,6 +770,9 @@ async function postMessage(convId, sender, kind, body, data = null, clientId = n
   const rows = await q('SELECT m.user_id, m.muted_until, u.prefs FROM conversation_members m JOIN users u ON u.id = m.user_id WHERE m.conversation_id = ?', [convId]);
   const quiet = (r) => (r.muted_until && r.muted_until > ts) || !prefsOf(r)[conv.is_group ? 'notify_groups' : 'notify_messages'];
   const tell = rows.filter((r) => r.user_id !== sender?.id && kind !== 'system' && !quiet(r));
+  // "Keep chats archived" off: a new message brings the chat back to the main list.
+  const unarchive = rows.filter((r) => r.user_id !== sender?.id && kind !== 'system' && !prefsOf(r).keep_archived).map((r) => r.user_id);
+  if (unarchive.length) await run('UPDATE conversation_members SET archived = 0 WHERE conversation_id = ? AND archived = 1 AND user_id = ANY(?)', [convId, unarchive]);
   const base = {
     kind: 'message', title, url: `/chat/${convId}`, tag: `chat-${convId}`,
     data: { conversation_id: convId, from: sender ? publicUser(sender) : null }, store: kind === 'plan',
@@ -915,7 +922,8 @@ api.post('/messages/:id/react', wrap(async (req, res) => {
     await run('DELETE FROM reactions WHERE message_id = ? AND user_id = ?', [m.id, req.user.id]);
     await run('INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING', [m.id, req.user.id, emoji, now()]);
     // Tell the author, like any other message (one notification per message, replaced if they change it).
-    if (m.sender_id && m.sender_id !== req.user.id) {
+    const author = m.sender_id && m.sender_id !== req.user.id ? await getUser(m.sender_id) : null;
+    if (author && prefsOf(author).notify_reactions) {
       const conv = await one('SELECT name, is_group FROM conversations WHERE id = ?', [m.conversation_id]);
       const what = { sticker: 'your sticker', gif: 'your GIF', image: 'your photo', voice: 'your voice message' }[m.kind] || `"${lockScreenText(m.body).slice(0, 80)}"`;
       background(notify([m.sender_id], {
@@ -1073,9 +1081,12 @@ api.post('/invites/:id/respond', wrap(async (req, res) => {
     return res.json({ ok: true, room_id: r.room_id });
   }
   await run('UPDATE invites SET status = ? WHERE id = ?', [accept ? 'accepted' : 'declined', r.id]);
+  // Answered: its "is calling" alert is done with.
+  await run('UPDATE notifications SET read = 1 WHERE user_id = ? AND url = ?', [req.user.id, `/invite/${r.id}`]);
   const what = r.kind === 'call' ? 'video call' : 'chill';
   await Promise.all([
     notify([r.from_id], {
+      store: !(accept && r.kind === 'call'), // they're already in the call together
       kind: 'invite_response',
       title: accept ? `${req.user.display_name} accepted your ${what}` : `${req.user.display_name} can't right now`,
       body: accept ? (r.kind === 'call' ? 'Joining the call now' : "They're down. Sort out the details in chat.") : `Declined your ${what} invite`,
@@ -1102,6 +1113,8 @@ const otherPeers = (room, peerId) => q('SELECT * FROM call_peers WHERE room = ? 
 /** Stop ringing people who haven't answered this user's call: mark it missed and tell their phones. */
 async function cancelRinging(user, room) {
   const rows = await q(`UPDATE invites SET status = 'missed' WHERE room_id = ? AND from_id = ? AND status = 'pending' RETURNING id, to_id`, [room, user.id]);
+  // The "is calling" alerts become one "missed call" each.
+  if (rows.length) await run('UPDATE notifications SET read = 1 WHERE url = ANY(?)', [rows.map((r) => `/invite/${r.id}`)]);
   await Promise.all(rows.map((r) => Promise.all([
     emitToUser(r.to_id, 'invite:cancel', { room_id: room, invite_id: r.id }),
     // Same tag as the ringing notification, so it replaces it on the lock screen.
@@ -1202,6 +1215,10 @@ api.post('/calls/:room/leave', wrap(async (req, res) => {
 api.get('/notifications', wrap(async (req, res) => {
   const rows = (await q('SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100', [req.user.id])).map((n) => parseRow(n));
   res.json({ notifications: rows, unread: rows.filter((n) => !n.read).length });
+}));
+api.delete('/notifications', wrap(async (req, res) => {
+  await run('DELETE FROM notifications WHERE user_id = ?', [req.user.id]);
+  res.json({ ok: true });
 }));
 api.post('/notifications/read-all', wrap(async (req, res) => {
   await run('UPDATE notifications SET read = 1 WHERE user_id = ?', [req.user.id]);

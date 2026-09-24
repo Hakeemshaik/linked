@@ -4,7 +4,7 @@ import { get, post } from '../lib/api.js';
 import { Avatar, Icon } from '../components/ui.jsx';
 import { ring } from '../lib/sound.js';
 
-function Video({ stream, muted, mirror, hidden, className = '' }) {
+function Video({ stream, muted, mirror, hidden, className = '', videoRef, pip }) {
   const ref = useRef(null);
   useEffect(() => {
     const v = ref.current;
@@ -12,7 +12,25 @@ function Video({ stream, muted, mirror, hidden, className = '' }) {
     if (v.srcObject !== stream) v.srcObject = stream || null;
     v.play?.().catch(() => {}); // iOS sometimes needs a nudge after the stream changes
   }, [stream]);
+  useEffect(() => {
+    if (videoRef) videoRef.current = ref.current;
+    // Leaving the app mid-call: the other person's video floats over your home screen where the phone allows it.
+    if (pip && ref.current) { ref.current.autoPictureInPicture = true; ref.current.setAttribute('autopictureinpicture', ''); }
+    return () => { if (videoRef && videoRef.current === ref.current) videoRef.current = null; };
+  });
   return <video ref={ref} autoPlay playsInline muted={muted} className={`${mirror ? 'mirror' : ''} ${hidden ? 'hidden' : ''} ${className}`} />;
+}
+
+const pipSupported = () => typeof document !== 'undefined' && (document.pictureInPictureEnabled
+  || (typeof HTMLVideoElement !== 'undefined' && 'webkitSetPresentationMode' in HTMLVideoElement.prototype));
+async function togglePip(v) {
+  if (!v) return false;
+  try {
+    if (document.pictureInPictureElement) { await document.exitPictureInPicture(); return false; }
+    if (v.requestPictureInPicture) { await v.requestPictureInPicture(); return true; }
+    if (v.webkitSetPresentationMode) { v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture'); return true; }
+  } catch { /* the browser said no */ }
+  return false;
 }
 
 // Connected as soon as either the connection or ICE says so (browsers don't all report both).
@@ -60,6 +78,7 @@ export default function Call({ room, minimized, onClose }) {
   const selfRef = useRef(null); // this browser's peer id in the call
   const everJoined = useRef(false);
   const endTimer = useRef(null);
+  const bigVideo = useRef(null); // the other person's video, for picture-in-picture
 
   const onCallScreen = () => location.pathname.startsWith('/call/');
   const minimize = () => navigate(window.history.length > 1 ? -1 : '/');
@@ -354,9 +373,9 @@ export default function Call({ room, minimized, onClose }) {
     if (!long) return 'Connecting…';
     return relay ? 'Still connecting… weak network' : "Can't reach them directly. Mobile data may need a call relay (see README).";
   };
-  const remoteView = (p, big) => (
+  const remoteView = (p, big, main = big) => (
     <div key={p.peerId} className={`tile ${big ? 'big' : ''}`}>
-      {p.stream && <Video stream={p.stream} hidden={p.cam === false} />}
+      {p.stream && <Video stream={p.stream} hidden={p.cam === false} videoRef={main ? bigVideo : undefined} pip={main} />}
       {(!p.stream || p.cam === false) && <div className="tile-avatar"><Avatar user={p.user} size={big ? 110 : 64} /></div>}
       {status(p) && <div className="tile-status">{status(p)}</div>}
       <span className="tile-name">{p.user?.display_name || 'Friend'}{p.mic === false ? ' · muted' : ''}</span>
@@ -368,6 +387,39 @@ export default function Call({ room, minimized, onClose }) {
       {(!local || !cam) && <div className="tile-avatar"><Avatar user={me} size={big ? 110 : 44} /></div>}
     </div>
   );
+  // On the lock screen and in the phone's media controls: who you're with, and buttons to mute or hang up.
+  const hangRef = useRef(null);
+  hangRef.current = { hangup: () => hangup(), mic: () => toggleMic(), cam: () => toggleCam() };
+  const other = solo?.user || who;
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms || typeof window.MediaMetadata === 'undefined') return;
+    try {
+      ms.metadata = new window.MediaMetadata({
+        title: other ? `Call with ${other.display_name}` : 'Linkup call',
+        artist: 'Linkup',
+        artwork: [{ src: other?.avatar ? `/art/avatars/${other.avatar}.png` : '/icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
+      });
+      ms.playbackState = 'playing';
+    } catch { /* older browsers */ }
+    const set = (a, fn) => { try { ms.setActionHandler(a, fn); } catch { /* not supported */ } };
+    set('hangup', () => hangRef.current.hangup());
+    set('togglemicrophone', () => hangRef.current.mic());
+    set('togglecamera', () => hangRef.current.cam());
+    set('enterpictureinpicture', () => togglePip(bigVideo.current));
+    return () => {
+      ['hangup', 'togglemicrophone', 'togglecamera', 'enterpictureinpicture'].forEach((a) => set(a, null));
+      try { ms.metadata = null; ms.playbackState = 'none'; } catch { /* ignore */ }
+    };
+  }, [other?.id]); // eslint-disable-line
+  useEffect(() => {
+    try { navigator.mediaSession?.setMicrophoneActive?.(mic); navigator.mediaSession?.setCameraActive?.(cam); } catch { /* not supported */ }
+  }, [mic, cam]);
+  // The app switcher and tab show the call and its timer.
+  const baseTitle = useRef(document.title);
+  useEffect(() => { document.title = connected ? `${names || 'Call'} · ${dur}` : 'Linkup call'; });
+  useEffect(() => () => { document.title = baseTitle.current; }, []);
+
   const spot = drag || pipSpot(corner);
   const pipContent = solo ? (swapped ? remoteView(solo, false) : selfView(false)) : peers.length > 1 || local ? selfView(false) : null;
 
@@ -382,6 +434,9 @@ export default function Call({ room, minimized, onClose }) {
     )}
     <div className={`call ${minimized ? 'mini' : ''}`} aria-hidden={minimized}>
       <button className="call-min" onClick={minimize} aria-label="Minimise call"><Icon name="down" size={26} /></button>
+      {peers.length > 0 && pipSupported() && (
+        <button className="call-min call-pip-btn" onClick={() => togglePip(bigVideo.current)} aria-label="Picture in picture"><Icon name="pip" size={24} /></button>
+      )}
       {peers.length === 0 ? (
         <div className="call-waiting">
           {local && cam && <Video stream={local} muted mirror={facing === 'user'} className="call-backdrop" />}
@@ -394,7 +449,7 @@ export default function Call({ room, minimized, onClose }) {
       ) : solo ? (
         <div className="call-solo">{swapped ? selfView(true) : remoteView(solo, true)}</div>
       ) : (
-        <div className={`call-grid n${Math.min(peers.length, 4)}`}>{peers.map((p) => remoteView(p, false))}</div>
+        <div className={`call-grid n${Math.min(peers.length, 4)}`}>{peers.map((p, i) => remoteView(p, false, i === 0))}</div>
       )}
       {peers.length > 0 && pipContent && (
         <div className={`pip ${drag ? 'dragging' : ''}`} style={{ transform: `translate(${spot.x}px, ${spot.y}px)` }}

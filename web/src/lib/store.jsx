@@ -1,9 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { get, post, getToken, setToken } from './api.js';
+import { api, get, post, getToken, setToken } from './api.js';
 import { connectRealtime } from './realtime.js';
 import { unlockAudioOnTouch } from './sound.js';
-import { registerSW, syncPush } from './push.js';
+import { registerSW, syncPush, closeNotifications, setBadge } from './push.js';
 import { cacheFor, cached, cache, clearCache } from './cache.js';
+import { applyLook } from './look.js';
+import { rememberAccount, forgetAccount } from './accounts.js';
+
+// Tokens from before devices were tracked carry no session id; swap them for one that shows in Linked devices.
+const hasSession = (t) => { try { return !!JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sid; } catch { return true; } };
 
 const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
@@ -17,6 +22,9 @@ export const STATUS = {
   offline: { label: 'Offline', color: 'var(--muted)' },
 };
 
+/** Unread messages that count: muted and archived chats wait quietly, like WhatsApp. */
+export const unreadChats = (convs) => convs.filter((c) => !c.muted && !c.archived).reduce((a, c) => a + (c.unread || (c.marked_unread ? 1 : 0)), 0);
+
 export function AppProvider({ children, navigate }) {
   const [token, setTok] = useState(getToken());
   // Shown from the last visit straight away, then refreshed.
@@ -27,6 +35,7 @@ export function AppProvider({ children, navigate }) {
     return next;
   }), []);
   const [config, setConfig] = useState(() => cached('config') || null);
+  const [prefs, setPrefsState] = useState(() => (getToken() && cached('prefs')) || null);
   const [friends, setFriends] = useState(() => (getToken() && cached('friends')) || { friends: [], incoming: [], outgoing: [] });
   const [unread, setUnread] = useState(0);
   const [chatUnread, setChatUnread] = useState(0);
@@ -57,20 +66,44 @@ export function AppProvider({ children, navigate }) {
   const loadFriends = useCallback(() => get('/friends').then((f) => { setFriends(f); cache('friends', f); }).catch(() => {}), []);
   const loadUnread = useCallback(() => {
     get('/notifications').then((r) => setUnread(r.unread)).catch(() => {});
-    get('/conversations').then((r) => { setChatUnread(r.conversations.reduce((a, c) => a + c.unread, 0)); setAiConvId(r.conversations.find((c) => c.is_ai)?.id || null); }).catch(() => {});
+    get('/conversations').then((r) => { setChatUnread(unreadChats(r.conversations)); setAiConvId(r.conversations.find((c) => c.is_ai)?.id || null); }).catch(() => {});
   }, []);
 
+  // Seeing something clears its alerts: { kinds: [...] } or { url }.
+  const markAlerts = useCallback((what) => post('/notifications/read', what)
+    .then((r) => r.read && setUnread((u) => Math.max(0, u - r.read))).catch(() => {}), []);
+
   const login = (t, user) => {
-    setToken(t); setTok(t); setMe(user);
+    setToken(t); setTok(t); setMe(user); rememberAccount(user, t);
     if (!location.pathname.startsWith('/join/')) navRef.current('/', { replace: true });
   };
-  const logout = () => { post('/presence', { visible: false }, { keepalive: true }).catch(() => {}); clearCache(); setToken(null); setTok(null); setMe(null); navRef.current('/', { replace: true }); };
+  const logout = () => {
+    post('/presence', { visible: false }, { keepalive: true }).catch(() => {});
+    if (me?.id) forgetAccount(me.id);
+    clearCache(); setToken(null); setTok(null); setMe(null); setPrefsState(null);
+    navRef.current('/', { replace: true });
+  };
+  // Another account on this phone: it opens fresh, with its own chats.
+  const switchAccount = (acc) => { clearCache(); setToken(acc.token); location.replace('/'); };
+  const addAccount = () => {
+    try { sessionStorage.setItem('linkup_adding', '1'); } catch { /* ignore */ }
+    clearCache(); setToken(null); setTok(null); setMe(null); setPrefsState(null);
+    navRef.current('/', { replace: true });
+  };
+  // Settings that follow you to every device: saved at once here, then on the server.
+  const savePrefs = useCallback(async (patchBody) => {
+    setPrefsState((p) => { const next = { ...(p || {}), ...patchBody }; applyLook(next); cache('prefs', next); return next; });
+    try {
+      const r = await api('/me/prefs', { method: 'PATCH', body: patchBody });
+      setPrefsState(r.prefs); cache('prefs', r.prefs); applyLook(r.prefs);
+    } catch (e) { toast({ title: "Couldn't save that", body: e.message }); }
+  }, []); // eslint-disable-line
 
   useEffect(() => unlockAudioOnTouch(), []);
   useEffect(() => {
     registerSW();
     get('/config').then((c) => { setConfig(c); cache('config', c); }).catch(() => {});
-    const onLogout = () => { clearCache(); setTok(null); setMe(null); };
+    const onLogout = () => { clearCache(); setTok(null); setMe((m) => { if (m?.id) forgetAccount(m.id); return null; }); };
     window.addEventListener('linkup:logout', onLogout);
     const onSW = (e) => {
       if (e.data?.type === 'navigate') navRef.current(e.data.url);
@@ -82,7 +115,10 @@ export function AppProvider({ children, navigate }) {
 
   useEffect(() => {
     if (!token) return;
-    get('/me').then((r) => setMe(r.user)).catch(() => {});
+    try { sessionStorage.removeItem('linkup_adding'); } catch { /* ignore */ }
+    get('/me').then((r) => { setMe(r.user); rememberAccount(r.user, getToken()); }).catch(() => {});
+    get('/me/prefs').then((r) => { setPrefsState(r.prefs); cache('prefs', r.prefs); applyLook(r.prefs); }).catch(() => {});
+    if (!hasSession(token)) post('/auth/refresh').then((r) => { if (r.token) { setToken(r.token); setTok(r.token); } }).catch(() => {});
     loadFriends();
     loadUnread();
   }, [token]); // eslint-disable-line
@@ -107,6 +143,11 @@ export function AppProvider({ children, navigate }) {
       setFriends((f) => ({ ...f, friends: f.friends.map((x) => (x.id === p.id ? p : x)) }));
     });
     s.on('friends:changed', loadFriends);
+    // Read on this or another device: the counts (and the icon badge) catch up.
+    let t = null;
+    const recount = () => { clearTimeout(t); t = setTimeout(loadUnread, 400); };
+    s.on('read', (p) => p.user_id === meId && recount());
+    s.on('conversations:changed', recount);
     s.on('notification', (n) => {
       // A reaction to your message: just the alert, it isn't an unread message.
       if (n.kind === 'reaction') {
@@ -152,17 +193,25 @@ export function AppProvider({ children, navigate }) {
     if (token && config) syncPush(config.vapidPublicKey);
   }, [token, config]);
 
+  // Opening the app clears its notifications off the lock screen, like WhatsApp. The icon keeps only what's still unread.
   useEffect(() => {
-    if (navigator.setAppBadge) {
-      const n = unread + chatUnread;
-      (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
-    }
-  }, [unread, chatUnread]);
+    if (!token) return;
+    const onShow = () => {
+      if (document.visibilityState !== 'visible') return;
+      closeNotifications();
+      loadUnread();
+    };
+    onShow();
+    document.addEventListener('visibilitychange', onShow);
+    return () => document.removeEventListener('visibilitychange', onShow);
+  }, [token]); // eslint-disable-line
+  useEffect(() => { setBadge(token ? unread + chatUnread : 0); }, [unread, chatUnread, token]);
 
   const value = useMemo(() => ({
-    token, me, setMe, config, friends, loadFriends, unread, setUnread, chatUnread, setChatUnread, loadUnread,
+    token, me, setMe, config, friends, loadFriends, unread, setUnread, chatUnread, setChatUnread, loadUnread, markAlerts,
     toasts, toast, dismissToast, incoming, setIncoming, rt, login, logout, navigate, openPlanner, aiConvId,
-  }), [token, me, config, friends, unread, chatUnread, toasts, incoming, rt, navigate, aiConvId]); // eslint-disable-line
+    prefs: prefs || {}, savePrefs, switchAccount, addAccount,
+  }), [token, me, config, friends, unread, chatUnread, toasts, incoming, rt, navigate, aiConvId, prefs]); // eslint-disable-line
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

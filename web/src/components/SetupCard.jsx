@@ -14,7 +14,7 @@ export default function SetupCard() {
   const [gone, setGone] = useState(hidden);
   if (!me || gone) return null;
   const steps = [
-    { done: !!me.avatar, icon: 'friends', title: 'Pick a profile picture', go: () => navigate('/settings?pic=1') },
+    { done: !!me.avatar, icon: 'friends', title: 'Pick a profile picture', go: () => navigate('/you/profile') },
     { done: push === 'granted', icon: 'bell', title: push === 'denied' ? 'Notifications are blocked in your phone settings' : 'Turn on notifications',
       go: async () => { try { await enablePush(config?.vapidPublicKey); toast({ title: 'Notifications on' }); } catch (e) { toast({ title: 'Notifications are off', body: e.message, ms: 7000 }); } setPush(pushState()); } },
     { done: friends.friends.length > 0, icon: 'userPlus', title: 'Invite a friend', go: () => shareInvite(me, toast) },

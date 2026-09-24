@@ -144,7 +144,8 @@ export function routes(api, h) {
     let common = [];
     const other = !conv.is_group && !conv.is_ai && conv.members.find((u) => !u.me);
     if (other) {
-      common = await q(`SELECT c.id, c.name, c.avatar FROM conversations c
+      common = await q(`SELECT c.id, CASE WHEN c.kind = 'announcements' THEN COALESCE(k.name, c.name) ELSE c.name END AS name, c.avatar, c.kind FROM conversations c
+        LEFT JOIN communities k ON k.id = c.community_id
         JOIN conversation_members a ON a.conversation_id = c.id AND a.user_id = ?
         JOIN conversation_members b ON b.conversation_id = c.id AND b.user_id = ?
         WHERE c.is_group = 1 ORDER BY c.updated_at DESC`, [req.user.id, other.id]);

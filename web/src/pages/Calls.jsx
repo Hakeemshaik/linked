@@ -12,13 +12,13 @@ const when = (iso) => {
 };
 
 export default function Calls() {
-  const { friends, navigate, toast } = useApp();
+  const { friends, navigate, toast, markAlerts } = useApp();
   const [calls, setCalls] = useState(null);
   const [pick, setPick] = useState(false);
   const [filter, setFilter] = useState('all');
 
   const load = () => get('/calls').then((r) => setCalls(r.calls)).catch(() => setCalls([]));
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); markAlerts({ kinds: ['missed_call', 'invite_call', 'invite_response'] }); }, []); // eslint-disable-line
   useSocket('invite', load);
   useSocket('notification', (n) => (n.kind === 'invite_response' || n.kind === 'missed_call') && load());
 

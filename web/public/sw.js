@@ -1,6 +1,6 @@
 /* Linkup service worker: push notifications + offline app shell */
 const CACHE = 'linkup-__BUILD__'; // the build stamps its version here
-const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png'];
+const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/badge-96.png', '/brand/mark.svg'];
 
 self.addEventListener('install', (e) => {
   // First install takes over straight away. An update waits until the person taps "Update",
@@ -79,11 +79,11 @@ self.addEventListener('push', (event) => {
         }
       }
       await self.registration.showNotification(title, options);
-      // Keep the app badge in sync where supported.
+      // The number on the app icon: what's unread (the server counts it), not how many banners piled up.
       if (self.navigator.setAppBadge) {
         try {
-          const list = await self.registration.getNotifications();
-          await self.navigator.setAppBadge(list.length);
+          const n = typeof p.badge === 'number' ? p.badge : (await self.registration.getNotifications()).length;
+          await (n > 0 ? self.navigator.setAppBadge(n) : self.navigator.clearAppBadge());
         } catch { /* ignore */ }
       }
       const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -110,7 +110,6 @@ self.addEventListener('notificationclick', (event) => {
       await self.clients.openWindow(target);
     })()
   );
-  if (self.navigator.clearAppBadge) self.navigator.clearAppBadge().catch(() => {});
 });
 
 // Browser rotated the push subscription: re-subscribe and tell the server.

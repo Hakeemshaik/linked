@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { get, post, del } from '../lib/api.js';
+import { get, post, del, patch } from '../lib/api.js';
 import { useApp, useSocket } from '../lib/store.jsx';
-import { Avatar, Orb, Icon, Sheet, TYPE_LABEL, reminderLabel } from '../components/ui.jsx';
+import { Avatar, GroupAvatar, Orb, Icon, Sheet, TYPE_LABEL, reminderLabel } from '../components/ui.jsx';
 import { fmtRange, fmtTime, relDay, dayKey } from '../lib/dates.js';
 import ArtPicker from '../components/ArtPicker.jsx';
 import RichText, { emojiOnly } from '../components/RichText.jsx';
@@ -20,6 +20,24 @@ const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toStrin
 const keyOf = (m) => m?.client_id || m?.id;
 const isMedia = (kind) => kind === 'sticker' || kind === 'gif';
 const smooth = () => !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const EDIT_MS = 15 * 60000; // your own messages can be edited for 15 minutes
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+export const fileSize = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
+const DOC_EXT = (name = '') => (name.split('.').pop() || 'file').slice(0, 4).toUpperCase();
+
+/* A document in the chat: its type, name and size. Tap to download. */
+export function DocCard({ m, clone }) {
+  const name = m.data?.name || m.body || 'Document';
+  const url = m.local || mediaUrl(m.data?.url);
+  const Tag = clone || m.pending || !url ? 'div' : 'a';
+  return (
+    <Tag className="doc-card" {...(Tag === 'a' ? { href: url, download: name, target: '_blank', rel: 'noopener' } : {})}>
+      <span className="doc-ic"><Icon name="doc" size={22} /><b>{DOC_EXT(name)}</b></span>
+      <span className="grow"><b className="ellipsis">{name}</b><small>{m.pending ? `Sending… ${Math.round((m.progress || 0) * 100)}%` : `${fileSize(m.data?.size || 0)} · ${DOC_EXT(name)}`}</small></span>
+      {!m.pending && <Icon name="download" size={20} className="doc-dl" />}
+    </Tag>
+  );
+}
 
 /** One reaction each: the same emoji takes yours back, another swaps it. */
 function toggleReaction(r = {}, emoji, uid) {
@@ -153,9 +171,10 @@ function Quote({ q, me, color, onClick }) {
       <span className="quote-text">
         <b className="ellipsis">{who}</b>
         <span className="quote-body">{isMedia(q.kind) ? (q.kind === 'gif' ? 'GIF' : 'Sticker')
-          : q.kind === 'image' ? <><Icon name="camera" size={15} className="quote-ic" />{q.body ? <RichText text={q.body} /> : 'Photo'}</>
+          : q.kind === 'image' ? <><Icon name="camera" size={15} className="quote-ic" />{q.body ? <RichText text={q.body} links={false} /> : 'Photo'}</>
           : q.kind === 'voice' ? <><Icon name="mic" size={15} className="quote-ic" />Voice message ({clock(q.duration)})</>
-          : q.kind === 'plan' ? `Plan: ${q.body}` : <RichText text={q.body} />}</span>
+          : q.kind === 'file' ? <><Icon name="doc" size={15} className="quote-ic" />{q.body || 'Document'}</>
+          : q.kind === 'plan' ? `Plan: ${q.body}` : <RichText text={q.body} links={false} />}</span>
       </span>
       {isMedia(q.kind) && q.ref && <img src={q.kind === 'gif' ? gifUrl(q.ref) : stickerUrl(q.ref)} alt="" draggable="false" />}
       {q.kind === 'image' && q.thumb && <img className="quote-photo" src={q.thumb} alt="" draggable="false" />}
@@ -313,7 +332,8 @@ function MessageMenu({ at, side, canReact, reactions, meId, names, onReact, acti
 const SKELETON = [['in', 58, 36], ['in', 36, 36], ['out', 52, 50], ['in', 66, 50], ['out', 34, 36], ['out', 60, 36], ['in', 44, 36]];
 
 export function ChatView({ convId: id }) {
-  const { me, friends, navigate, toast, loadUnread } = useApp();
+  const { me, friends, navigate, toast, loadUnread, prefs } = useApp();
+  const enterSends = prefs.enter_sends !== false;
   const [qs, setQs] = useSearchParams();
   const [conv, setConv] = useState(null);
   // Who you are, from the chat itself too, so nothing waits for the profile to load.
@@ -332,7 +352,10 @@ export function ChatView({ convId: id }) {
   const [menu, setMenu] = useState(null);
   const [photos, setPhotos] = useState(null);
   const [viewer, setViewer] = useState(null);
+  const [editing, setEditing] = useState(null); // your message being edited
+  const [search, setSearch] = useState(qs.get('search') ? { q: '', results: [], i: 0 } : null);
   const fileRef = useRef(null);
+  const docRef = useRef(null);
   const [jump, setJump] = useState(false);
   const [unseen, setUnseen] = useState(0);
   const listRef = useRef(null);
@@ -387,11 +410,13 @@ export function ChatView({ convId: id }) {
       setMsgs((x) => [...r.messages, ...x.filter((m) => (m.pending || m.failed) && !r.messages.some((y) => y.id === m.id))]);
       setMore(!!r.more);
       markRead();
+      const target = qs.get('m');
+      if (target) { setQs({}, { replace: true }); setTimeout(() => reveal(target), 120); }
     }).catch(() => live && navigate('/', { replace: true }));
     // Reading the chat clears its notifications from the lock screen.
     navigator.serviceWorker?.ready.then((r) => r.getNotifications({ tag: `chat-${id}` })).then((ns) => ns?.forEach((n) => n.close())).catch(() => {});
     if (qs.get('draft')) { setText(qs.get('draft')); setQs({}, { replace: true }); setTimeout(() => inputRef.current?.focus(), 300); }
-    if (qs.get('ask')) setQs({}, { replace: true });
+    if (qs.get('ask') || qs.get('search')) setQs({}, { replace: true });
     return () => { live = false; };
   }, [id]); // eslint-disable-line
 
@@ -458,6 +483,26 @@ export function ChatView({ convId: id }) {
     } catch { /* the next scroll tries again */ } finally { loadingOlder.current = false; setOlder(false); }
   };
 
+  // Show a message that may not be loaded yet (from search, starred or media): load back until it's there.
+  const reveal = async (mid) => {
+    for (let i = 0; i < 12; i++) {
+      if (document.getElementById(`m-${mid}`)) return jumpTo(mid);
+      const oldest = msgsRef.current.find((m) => !m.pending && !m.failed);
+      if (!oldest) break;
+      const r = await get(`/conversations/${id}/messages?before=${encodeURIComponent(oldest.created_at)}&limit=200`).catch(() => null);
+      if (!r || !r.messages.length) break;
+      r.messages.forEach((m) => initialIds.current?.add(m.id));
+      const el = listRef.current;
+      if (el) anchor.current = { h: el.scrollHeight, top: el.scrollTop };
+      setMsgs((x) => [...r.messages.filter((m) => !x.some((y) => y.id === m.id)), ...x]);
+      setMore(!!r.more);
+      await wait(80);
+      if (!r.more && !document.getElementById(`m-${mid}`)) break;
+    }
+    if (document.getElementById(`m-${mid}`)) jumpTo(mid);
+    else toast({ title: "Couldn't find that message", body: 'It may have been cleared' });
+  };
+
   const onScroll = () => {
     const el = listRef.current;
     if (!el) return;
@@ -519,6 +564,13 @@ export function ChatView({ convId: id }) {
   });
   useSocket('presence', (p) => setConv((c) => c && { ...c, members: c.members.map((m) => (m.id === p.id && !m.me ? p : m)) }));
 
+  // The box grows with what you write, up to about five lines.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el || el.tagName !== 'TEXTAREA') return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 124)}px`;
+  }, [text]);
   const onType = (e) => {
     setText(e.target.value);
     if (Date.now() - lastTyping.current > 2000) { lastTyping.current = Date.now(); post(`/conversations/${id}/typing`).catch(() => {}); }
@@ -537,21 +589,22 @@ export function ChatView({ convId: id }) {
   // If it fails it stays, marked "Not sent", until you tap it or the phone comes back online.
   const deliver = async (t, after) => {
     setMsgs((x) => [...x.filter((y) => y.id !== t.id), { ...t, pending: true, failed: false }]);
-    const patch = (p) => setMsgs((x) => x.map((y) => (y.id === t.id ? { ...y, ...p } : y)));
+    const patchMsg = (p) => setMsgs((x) => x.map((y) => (y.id === t.id ? { ...y, ...p } : y)));
     if (after) await after; // several photos at once go out in the order they were picked
     try {
       let req = t.req;
       // Photos and voice messages upload first; a retry after that only resends the message.
       if (t.file && !req.media) {
         let shown = 0;
-        const media = await uploadMedia(id, t.file, (p) => { if (p - shown >= 0.1 || p === 1) { shown = p; patch({ progress: p }); } });
+        const media = await uploadMedia(id, t.file, (p) => { if (p - shown >= 0.1 || p === 1) { shown = p; patchMsg({ progress: p }); } }, t.fileName);
         req = { ...req, media: media.id };
-        patch({ req });
+        patchMsg({ req });
       }
       const r = await post(`/conversations/${id}/messages`, { ...req, client_id: t.client_id });
       upsert(r.message);
-    } catch {
-      setMsgs((x) => x.map((y) => (y.id === t.id ? { ...y, pending: false, failed: true } : y)));
+    } catch (x) {
+      setMsgs((xs) => xs.map((y) => (y.id === t.id ? { ...y, pending: false, failed: true } : y)));
+      if (/can't message|blocked/i.test(x?.message || '')) toast({ title: 'Not sent', body: x.message });
     }
   };
   const deliverRef = useRef(deliver);
@@ -579,7 +632,7 @@ export function ChatView({ convId: id }) {
     setText('');
     queue({ body }, { kind: 'text', body });
   };
-  const send = (e) => { e?.preventDefault(); sendText(text); inputRef.current?.focus(); };
+  const send = (e) => { e?.preventDefault(); if (editing) saveEdit(); else sendText(text); inputRef.current?.focus(); };
   // Emoji go into the text at the cursor; stickers and GIFs send at once.
   const addEmoji = (eid) => {
     const el = inputRef.current;
@@ -657,6 +710,60 @@ export function ChatView({ convId: id }) {
   };
   const openMenu = (m, el, side, first) => el && setMenu({ m, at: el.getBoundingClientRect(), side, first });
 
+  // Search in the chat: newest match first, arrows step through them.
+  const searchTimer = useRef(null);
+  const runSearch = (q) => {
+    setSearch((s) => ({ ...s, q }));
+    clearTimeout(searchTimer.current);
+    if (q.trim().length < 2) return setSearch((s) => ({ ...s, results: [], i: 0, done: false }));
+    searchTimer.current = setTimeout(async () => {
+      const r = await get(`/conversations/${id}/search?q=${encodeURIComponent(q.trim())}`).catch(() => ({ results: [] }));
+      setSearch((s) => (s && s.q === q ? { ...s, results: r.results, i: 0, done: true } : s));
+      if (r.results[0]) reveal(r.results[0].id);
+    }, 280);
+  };
+  const stepSearch = (d) => setSearch((s) => {
+    if (!s?.results.length) return s;
+    const i = (s.i + d + s.results.length) % s.results.length;
+    reveal(s.results[i].id);
+    return { ...s, i };
+  });
+
+  const star = async (m) => {
+    setMenu(null);
+    const on = !m.starred;
+    setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, starred: on } : y)));
+    try { await post(`/messages/${m.id}/star`); toast({ title: on ? 'Starred' : 'Unstarred', icon: 'star', ms: 1600 }); }
+    catch (x) { setMsgs((xs) => xs.map((y) => (y.id === m.id ? { ...y, starred: !on } : y))); toast({ title: 'Could not star', body: x.message }); }
+  };
+  const startEdit = (m) => {
+    setMenu(null); setReplyTo(null);
+    setEditing(m);
+    setText(m.body || '');
+    setTimeout(() => inputRef.current?.focus(), 60);
+  };
+  const saveEdit = async () => {
+    const m = editing;
+    const body = text.trim();
+    if (!m) return;
+    setEditing(null); setText('');
+    if (!body || body === m.body) return;
+    setMsgs((x) => x.map((y) => (y.id === m.id ? { ...y, body, edited_at: new Date().toISOString() } : y)));
+    try { upsert((await patch(`/messages/${m.id}`, { body })).message); }
+    catch (x) { setMsgs((xs) => xs.map((y) => (y.id === m.id ? m : y))); toast({ title: 'Could not edit', body: x.message }); }
+  };
+  const cancelEdit = () => { setEditing(null); setText(''); };
+
+  // Documents: PDFs, Word, Excel, slides, text, zip. Up to 4 MB.
+  const pickDoc = () => { setAttach(false); docRef.current?.click(); };
+  const onDoc = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > 4e6) return toast({ title: 'That file is too big', body: 'Documents can be up to 4 MB' });
+    queue({ kind: 'file' }, { kind: 'file', body: f.name, data: { name: f.name, size: f.size, type: f.type }, file: f, fileName: f.name });
+  };
+
   // The orb with something typed: ask Planner that, right here in the chat.
   const askPlanner = () => {
     const q = text.trim();
@@ -714,9 +821,11 @@ export function ChatView({ convId: id }) {
   const recording = rec.state !== 'idle';
   const voiceOk = !planner && canRecord();
   const others = conv.members.filter((m) => !m.me);
+  const blockedOther = !conv.is_group && !planner && others[0]?.blocked;
   const planMembers = planner ? [self, ...friends.friends].filter(Boolean) : conv.members;
   const sub = planner ? (thinking ? (draft ? 'writing…' : 'thinking…') : 'ask me anything, I plan too')
     : typing ? `${conv.is_group ? `${typing.display_name.split(' ')[0]} is ` : ''}typing…`
+    : conv.kind === 'announcements' ? `Announcements · ${conv.members.length} member${conv.members.length === 1 ? '' : 's'}`
     : conv.is_group ? others.map((m) => m.display_name.split(' ')[0]).join(', ') + ', You'
     : lastSeen(others[0]);
 
@@ -748,11 +857,14 @@ export function ChatView({ convId: id }) {
     const mine = m.sender_id === meId;
     const ai = m.kind === 'ai';
     const reply = m.data?.reply;
-    const meta = <span className="meta">{fmtTime(m.created_at)}{mine && tickFor(m)}</span>;
+    const meta = (
+      <span className="meta">{m.starred && <Icon name="star" size={11} className="star-ic" />}{m.edited_at && <span className="edited">edited</span>}
+        {fmtTime(m.created_at)}{mine && tickFor(m)}</span>
+    );
     const who = first && !mine && (conv.is_group || (ai && !planner)) && (
       <span className="who" style={{ color: ai ? 'var(--accent)' : nameColor(m.sender) }}>{ai ? 'Planner' : m.sender?.display_name}</span>
     );
-    const quote = reply && <Quote q={reply} me={self} color={quoteColor(reply)} onClick={clone ? undefined : () => jumpTo(reply.id)} />;
+    const quote = reply && <Quote q={reply} me={self} color={quoteColor(reply)} onClick={clone ? undefined : () => reveal(reply.id)} />;
     if (m.kind === 'deleted') return (
       <div className="bubble deleted">
         <span className="text"><Icon name="block" size={15} />{mine ? 'You deleted this message' : 'This message was deleted'}</span>{meta}
@@ -781,6 +893,13 @@ export function ChatView({ convId: id }) {
         </div>
       );
     }
+    if (m.kind === 'file') return (
+      <div className="bubble doc-bubble">
+        {who}{quote}
+        <DocCard m={m} clone={clone} />
+        {meta}
+      </div>
+    );
     if (m.kind === 'voice') return (
       <div className="bubble voice-bubble">
         {who}{quote}
@@ -792,7 +911,7 @@ export function ChatView({ convId: id }) {
     return (
       <div className={`bubble ${ai && !planner ? 'ai' : ''} ${big ? `jumbo n${big}` : ''}`}>
         {who}{quote}
-        <span className="text">{ai ? (clone ? m.body : <Reveal text={m.body} fresh={freshIds.current.has(m.id)} />) : <RichText text={m.body} />}</span>
+        <span className="text">{ai && !search ? (clone ? m.body : <Reveal text={m.body} fresh={freshIds.current.has(m.id)} />) : <RichText text={m.body} highlight={search?.q.trim()} />}</span>
         {meta}
       </div>
     );
@@ -837,22 +956,38 @@ export function ChatView({ convId: id }) {
     { label: 'Delete', icon: 'trash', danger: true, run: () => remove(m) },
   ] : [
     { label: 'Reply', icon: 'reply', run: () => startReply(m) },
+    m.sender_id === meId && m.kind === 'text' && Date.now() - Date.parse(m.created_at) < EDIT_MS && { label: 'Edit', icon: 'edit', run: () => startEdit(m) },
+    { label: m.starred ? 'Unstar' : 'Star', icon: 'star', run: () => star(m) },
     !planner && m.sender_id && { label: 'Ask Planner', icon: 'spark', run: () => askAbout(m) },
     (m.kind === 'text' || m.kind === 'ai' || (m.kind === 'image' && m.body)) && { label: m.kind === 'image' ? 'Copy caption' : 'Copy', icon: 'copy', run: () => copy(m) },
     m.kind === 'image' && m.data?.url && { label: 'Save photo', icon: 'download', run: () => { setMenu(null); savePhoto(m.data.url).catch(() => toast({ title: "Couldn't save the photo" })); } },
+    m.kind === 'file' && m.data?.url && { label: 'Download', icon: 'download', run: () => { setMenu(null); window.open(mediaUrl(m.data.url), '_blank'); } },
     m.sender_id === meId && { label: 'Delete for everyone', icon: 'trash', danger: true, confirm: 'Delete this message for everyone?', run: () => remove(m) },
   ].filter(Boolean));
 
   return (
     <div className="chat">
+      {search ? (
+        <header className="chat-header search-head">
+          <label className="search grow">
+            <Icon name="search" size={18} />
+            <input autoFocus value={search.q} onChange={(e) => runSearch(e.target.value)} placeholder="Search this chat" aria-label="Search this chat"
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); stepSearch(1); } if (e.key === 'Escape') setSearch(null); }} />
+          </label>
+          <span className="search-count muted small">{search.results.length ? `${search.i + 1} of ${search.results.length}` : search.done ? 'None' : ''}</span>
+          <button className="icon-plain sm" disabled={!search.results.length} onClick={() => stepSearch(1)} aria-label="Older match"><Icon name="up" size={22} /></button>
+          <button className="icon-plain sm" disabled={!search.results.length} onClick={() => stepSearch(-1)} aria-label="Newer match"><Icon name="down" size={22} /></button>
+          <button className="link" onClick={() => setSearch(null)}>Done</button>
+        </header>
+      ) : (
       <header className="chat-header">
         <button className="back-btn" onClick={() => navigate('/')} aria-label="Back"><Icon name="left" size={26} /></button>
-        <button className="chat-who plain" onClick={() => !planner && !conv.is_group && others[0] && navigate('/friends')}>
+        <button className="chat-who plain" onClick={() => !planner && navigate(`/chat/${id}/info`)} aria-label={planner ? undefined : 'Contact info'}>
           {planner ? <Orb size={38} state={thinking ? 'thinking' : 'idle'} /> : conv.is_group
-            ? <span className="stack sm">{others.slice(0, 2).map((m) => <Avatar key={m.id} user={m} size={28} />)}</span>
+            ? <GroupAvatar conv={conv} size={38} />
             : <Avatar user={others[0]} size={38} />}
           <span className="grow">
-            <b className="ellipsis">{planner ? 'Planner' : conv.title}</b>
+            <b className="ellipsis">{planner ? 'Planner' : conv.title}{conv.muted && <Icon name="bellOff" size={14} className="muted inline-ic" />}</b>
             <small className={`ellipsis ${typing || (thinking && planner) ? 'accent' : ''}`}>{sub}</small>
           </span>
         </button>
@@ -861,9 +996,10 @@ export function ChatView({ convId: id }) {
           <button className="icon-plain" onClick={callAll} aria-label="Call"><Icon name="phone" size={22} /></button>
         </>}
       </header>
+      )}
 
       <div className="messages-wrap">
-        <div className="messages wallpaper" ref={listRef} onScroll={onScroll}>
+        <div className={`messages wallpaper ${conv.theme ? `theme-${conv.theme}` : ''}`} ref={listRef} onScroll={onScroll}>
           {more && <div className="older">{older && <span className="spinner sm" />}</div>}
           {days.map(({ d, at, list }) => {
             let prev = null;
@@ -904,19 +1040,35 @@ export function ChatView({ convId: id }) {
         <div className="suggest-row">{[...starters, ...quick].map((q) => <button key={q} className="suggest-chip" onClick={() => sendText(q)}>{q}</button>)}</div>
       )}
 
+      {editing && (
+        <div className="reply-bar edit-bar">
+          <span className="edit-ic"><Icon name="edit" size={18} /></span>
+          <span className="quote-text grow"><b className="accent">Edit message</b><span className="quote-body">{editing.body}</span></span>
+          <button type="button" className="icon-plain sm" onClick={cancelEdit} aria-label="Cancel edit"><Icon name="x" size={20} /></button>
+        </div>
+      )}
       {replyTo && (
         <div className="reply-bar">
           <Quote q={replyData(replyTo)} me={self} color={quoteColor(replyTo)} />
           <button type="button" className="icon-plain sm" onClick={() => setReplyTo(null)} aria-label="Cancel reply"><Icon name="x" size={20} /></button>
         </div>
       )}
+      {blockedOther ? (
+        <button className="composer blocked-bar" onClick={() => navigate(`/chat/${id}/info`)}>
+          <Icon name="block" size={18} /><span>You blocked {others[0].display_name.split(' ')[0]}. Tap to unblock.</span>
+        </button>
+      ) : (
       <form className={`composer ${recording ? 'recording' : ''}`} onSubmit={send}>
         {!planner && !recording && <button type="button" className="icon-plain" onClick={() => setAttach(true)} aria-label="More"><Icon name="plus" size={26} /></button>}
         {recording ? <RecordingBar rec={rec} onCancel={() => rec.cancel()} /> : (
           <div className="input-pill">
-            <input ref={inputRef} value={text} onChange={onType} enterKeyHint="send"
-              onKeyDown={(e) => e.key === 'Escape' && replyTo && setReplyTo(null)}
-              placeholder={replyTo ? 'Reply' : planner ? 'Ask me anything' : 'Message'} aria-label="Message" />
+            <textarea ref={inputRef} value={text} onChange={onType} rows={1} enterKeyHint={enterSends ? 'send' : 'enter'}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') { if (editing) cancelEdit(); else if (replyTo) setReplyTo(null); }
+                // Enter sends (unless you turned that off); Shift+Enter is always a new line.
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && enterSends) { e.preventDefault(); send(); }
+              }}
+              placeholder={editing ? 'Edit message' : replyTo ? 'Reply' : planner ? 'Ask me anything' : 'Message'} aria-label="Message" />
             <button type="button" className="icon-plain sm muted-ic" onClick={() => setPicker(true)} aria-label="Emoji, stickers and GIFs"><Icon name="smile" size={24} /></button>
             {!planner && !text.trim() && <button type="button" className="icon-plain sm muted-ic" onClick={pickPhotos} aria-label="Send a photo"><Icon name="camera" size={23} /></button>}
             {!planner && <button type="button" className="icon-plain sm" onClick={text.trim() ? askPlanner : planIt} disabled={thinking && !text.trim()}
@@ -924,10 +1076,13 @@ export function ChatView({ convId: id }) {
           </div>
         )}
         {recording ? <button type="button" className="send ready" onClick={sendVoice} aria-label="Send voice message"><Icon name="send" size={20} /></button>
-          : voiceOk && !text.trim() ? <button type="button" className="send mic" onClick={startVoice} aria-label="Record a voice message"><Icon name="mic" size={22} /></button>
-          : <button className={`send ${text.trim() ? 'ready' : ''}`} disabled={!text.trim()} aria-label="Send"><Icon name="send" size={20} /></button>}
+          : voiceOk && !text.trim() && !editing ? <button type="button" className="send mic" onClick={startVoice} aria-label="Record a voice message"><Icon name="mic" size={22} /></button>
+          : <button className={`send ${text.trim() ? 'ready' : ''}`} disabled={!text.trim()} aria-label={editing ? 'Save' : 'Send'}><Icon name={editing ? 'check' : 'send'} size={20} /></button>}
       </form>
+      )}
       <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={onPicked} />
+      <input ref={docRef} type="file" hidden onChange={onDoc}
+        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.rtf,.zip,application/pdf,text/plain,text/csv" />
       {photos && <PhotoSend files={photos} title={planner ? 'Planner' : conv.title} onClose={() => setPhotos(null)} onSend={sendPhotos} />}
       {viewer && <PhotoViewer m={viewer} who={viewer.sender_id === meId ? 'You' : viewer.sender?.display_name || ''} onClose={() => setViewer(null)} toast={toast} />}
 
@@ -941,6 +1096,7 @@ export function ChatView({ convId: id }) {
       <Sheet open={attach} onClose={() => setAttach(false)}>
         <div className="attach-grid">
           <button onClick={pickPhotos}><span style={{ '--c': 'var(--blue)' }}><Icon name="image" size={26} /></span>Photos</button>
+          <button onClick={pickDoc}><span style={{ '--c': 'var(--gold)' }}><Icon name="doc" size={26} /></span>Document</button>
           <button onClick={planIt}><span className="ai-tile"><Orb size={30} /></span>Plan it</button>
           <button onClick={() => { setAttach(false); navigate(`/plans/new?with=${others.map((o) => o.id).join(',')}`); }}><span style={{ '--c': 'var(--violet)' }}><Icon name="cal" size={26} /></span>New plan</button>
           <button onClick={() => { setAttach(false); callAll(); }}><span style={{ '--c': 'var(--ok)' }}><Icon name="video" size={26} /></span>Video call</button>

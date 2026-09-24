@@ -146,7 +146,7 @@ export function routes(api, { wrap, bad }) {
   // ---------- password, preferences, storage, delete ----------
   api.post('/me/password', wrap(async (req, res) => {
     const { current, next } = req.body || {};
-    if (!(await bcrypt.compare(current || '', req.user.password_hash))) return bad(res, 'Your current password is wrong', 401);
+    if (!(await bcrypt.compare(current || '', req.user.password_hash))) return bad(res, 'Your current password is wrong', 403);
     if (!next || next.length < 6) return bad(res, 'The new password needs at least 6 characters');
     await run('UPDATE users SET password_hash = ? WHERE id = ?', [await bcrypt.hash(next, 10), req.user.id]);
     // Other devices have to sign in again with the new password.
@@ -176,7 +176,7 @@ export function routes(api, { wrap, bad }) {
 
   // Deleting your account signs you out everywhere and removes you. Chats keep your old messages as "Deleted account".
   api.post('/me/delete', wrap(async (req, res) => {
-    if (!(await bcrypt.compare(req.body?.password || '', req.user.password_hash))) return bad(res, 'Wrong password', 401);
+    if (!(await bcrypt.compare(req.body?.password || '', req.user.password_hash))) return bad(res, 'Wrong password', 403);
     const uid = req.user.id;
     await run(`UPDATE users SET username = ?, display_name = 'Deleted account', password_hash = '!', avatar = NULL, status_text = '',
       status = 'invisible', invite_code = NULL, prefs = NULL WHERE id = ?`, [`deleted-${uid.slice(0, 8)}`, uid]);

@@ -10,13 +10,13 @@ const RSVP = { going: 'Going', maybe: 'Maybe', declined: "Can't", pending: 'No a
 export default function EventPage() {
   const { id } = useParams();
   const [qs, setQs] = useSearchParams();
-  const { me, navigate, toast } = useApp();
+  const { me, navigate, toast, markAlerts } = useApp();
   const [e, setE] = useState(null);
   const [err, setErr] = useState('');
   const acted = useRef(false);
 
   const load = () => get(`/events/${id}`).then((r) => setE(r.event)).catch((x) => setErr(x.message));
-  useEffect(() => { load(); }, [id]);
+  useEffect(() => { load(); markAlerts({ url: `/event/${id}` }); }, [id]); // eslint-disable-line
   useSocket('events:changed', (p) => p.event_id === id && load());
 
   const rsvp = async (v) => {

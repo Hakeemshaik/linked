@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { get, post, del } from '../lib/api.js';
 import { useApp, useSocket } from '../lib/store.jsx';
-import { Avatar, Sheet, Icon, Orb, TYPE_LABEL } from '../components/ui.jsx';
+import { Avatar, Sheet, Icon, Orb, Header, TYPE_LABEL } from '../components/ui.jsx';
 import { addDays, dayKey, fromKey, fmtLongDay, fmtTime } from '../lib/dates.js';
 
 const STATE = {
@@ -77,31 +77,44 @@ export default function Calendar() {
   const month = (n) => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + n, 1));
   const dayWord = sel === today ? 'today' : selDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' });
 
+  // Swipe the month card sideways to change month.
+  const swipe = useRef(null);
+  const onDown = (e) => { swipe.current = { x: e.clientX, y: e.clientY }; };
+  const onUp = (e) => {
+    const s0 = swipe.current; swipe.current = null;
+    if (!s0) return;
+    const dx = e.clientX - s0.x, dy = e.clientY - s0.y;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) month(dx < 0 ? 1 : -1);
+  };
+  const goToday = () => { const d = new Date(); setCursor(new Date(d.getFullYear(), d.getMonth(), 1)); setSel(today); };
+  const away = cursor.getMonth() !== new Date().getMonth() || cursor.getFullYear() !== new Date().getFullYear() || sel !== today;
+  const busyFriends = selRows.filter((r) => !r.u.me && r.state !== 'free').length;
+
   return (
     <>
-      <header className="header large">
-        <div className="grow"><h1>Calendar</h1></div>
+      <Header title="Calendar" right={<>
+        {away && <button className="today-pill" onClick={goToday}>Today</button>}
         <button className="icon-plain accent" onClick={() => navigate('/plans/new')} aria-label="New plan"><Icon name="plus" size={26} /></button>
-      </header>
-      <div className="month-nav">
-        <b>{cursor.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}</b>
-        <button className="icon-plain accent" onClick={() => month(-1)} aria-label="Previous month"><Icon name="left" /></button>
-        <button className="icon-plain accent" onClick={() => month(1)} aria-label="Next month"><Icon name="right" /></button>
-      </div>
+      </>} />
 
-      <section className="month">
-        <div className="cal-dow">{DOW.map((d, i) => <span key={i}>{d}</span>)}</div>
-        <div className="cal-grid">
+      <section className="cal-card" onPointerDown={onDown} onPointerUp={onUp} onPointerCancel={() => { swipe.current = null; }}>
+        <div className="cal-head">
+          <b key={cursor.getTime()} className="cal-month">{cursor.toLocaleDateString('en-GB', { month: 'long' })} <span>{cursor.getFullYear()}</span></b>
+          <button className="round-btn" onClick={() => month(-1)} aria-label="Previous month"><Icon name="left" size={20} /></button>
+          <button className="round-btn" onClick={() => month(1)} aria-label="Next month"><Icon name="right" size={20} /></button>
+        </div>
+        <div className="cal-dow">{DOW.map((d, i) => <span key={i} className={i > 4 ? 'wknd' : ''}>{d}</span>)}</div>
+        <div className="cal-grid" key={from}>
           {grid.map((d) => {
             const key = dayKey(d);
             const evs = myEvents(key);
             const mineBusy = data.blocks.some((b) => b.user_id === me?.id && b.date === key && b.kind !== 'free');
             const allFree = users.length > 1 && key >= today && users.every((u) => dayState(u.id, key, data).state === 'free');
-            const cls = ['cal-day', d.getMonth() !== cursor.getMonth() && 'out', key < today && 'past', key === today && 'today', key === sel && 'sel'].filter(Boolean).join(' ');
+            const cls = ['cal-day', d.getMonth() !== cursor.getMonth() && 'out', key < today && 'past', key === today && 'today', key === sel && 'sel', evs.length && 'has'].filter(Boolean).join(' ');
             return (
               <button key={key} className={cls} onClick={() => setSel(key)}
-                aria-label={`${fmtLongDay(d)}${evs.length ? `, ${evs.length} plans` : ''}${allFree ? ', everyone free' : ''}`}>
-                <span className="n mono">{d.getDate()}</span>
+                aria-label={`${fmtLongDay(d)}${evs.length ? `, ${evs.length} plans` : ''}${allFree ? ', everyone free' : ''}`} aria-pressed={key === sel}>
+                <span className="n">{d.getDate()}</span>
                 <span className="dots">
                   {evs.slice(0, 3).map((e) => <i key={e.id} className={`dot t-${e.type}`} />)}
                   {!evs.length && mineBusy && <i className="dot mine-busy" />}
@@ -112,54 +125,50 @@ export default function Calendar() {
           })}
         </div>
         <div className="legend">
-          <span><i className="dot t-hangout" />Your plans</span>
+          <span><i className="dot t-hangout" />Plans</span>
           <span><i className="dot mine-busy" />You're busy</span>
-          <span><i className="dot all-free" />Everyone's free</span>
-          {(cursor.getMonth() !== new Date().getMonth() || sel !== today) && (
-            <button className="link" onClick={() => { const d = new Date(); setCursor(new Date(d.getFullYear(), d.getMonth(), 1)); setSel(today); }}>Today</button>
-          )}
+          <span><i className="dot all-free" />Everyone free</span>
         </div>
       </section>
 
-      <section>
-        <div className="section-head">
-          <h2 className="list-label">{sel === today ? 'Today' : fmtLongDay(selDate)}</h2>
-          <button className="link" onClick={() => navigate(`/plans/new?date=${sel}`)}>Add plan</button>
+      <section className="day-card" key={sel}>
+        <div className="day-head">
+          <span className="day-badge"><small>{selDate.toLocaleDateString('en-GB', { weekday: 'short' })}</small><b>{selDate.getDate()}</b></span>
+          <span className="grow">
+            <b>{sel === today ? 'Today' : selDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</b>
+            <small className="muted">{[selEvents.length ? `${selEvents.length} plan${selEvents.length > 1 ? 's' : ''}` : 'Nothing planned', users.length > 1 && `${freeFriends} free${busyFriends ? `, ${busyFriends} busy` : ''}`].filter(Boolean).join(' · ')}</small>
+          </span>
+          <button className="round-btn accent-btn" onClick={() => navigate(`/plans/new?date=${sel}`)} aria-label="Add a plan on this day"><Icon name="plus" size={20} /></button>
         </div>
 
-        {selEvents.length > 0 ? (
-          <div className="group-list">
-            {selEvents.map((e) => (
-              <button key={e.id} className="row-item" onClick={() => navigate(`/event/${e.id}`)}>
-                <span className="time-col mono">{fmtTime(e.start_at)}<small>{fmtTime(e.end_at)}</small></span>
-                <span className={`bar t-${e.type}`} />
-                <span className="grow"><b>{e.title}</b><small>{TYPE_LABEL[e.type]}{e.rsvp && e.rsvp !== 'going' ? ` · you said ${e.rsvp}` : ''}</small></span>
-                <Icon name="right" size={18} className="muted" />
-              </button>
-            ))}
-          </div>
-        ) : null}
+        {selEvents.map((e) => (
+          <button key={e.id} className={`event-card t-${e.type}`} onClick={() => navigate(`/event/${e.id}`)}>
+            <span className="event-time"><b>{fmtTime(e.start_at)}</b><small>{fmtTime(e.end_at)}</small></span>
+            <span className="grow"><b className="ellipsis">{e.title}</b><small>{TYPE_LABEL[e.type]}{e.location ? ` · ${e.location}` : ''}{e.rsvp && e.rsvp !== 'going' ? ` · you said ${e.rsvp}` : ''}</small></span>
+            <Icon name="right" size={18} className="muted" />
+          </button>
+        ))}
 
-        <button className="group-list row-item ask" onClick={() => openPlanner(`Plan something ${sel === today ? 'today' : `on ${fmtLongDay(selDate)}`} `)}>
+        <button className="planner-card" onClick={() => openPlanner(`Plan something ${sel === today ? 'today' : `on ${fmtLongDay(selDate)}`} `)}>
           <Orb size={40} />
           <span className="grow">
-            <b>{selEvents.length ? 'Add something else' : 'Nothing planned'}</b>
+            <b>{selEvents.length ? 'Add something else' : 'Make a plan'}</b>
             <small>{freeFriends ? `${freeFriends} friend${freeFriends > 1 ? 's are' : ' is'} free ${dayWord}. Ask Planner to set it up.` : `Ask Planner to plan ${dayWord}.`}</small>
           </span>
-          <Icon name="right" size={18} />
+          <Icon name="spark" size={18} className="accent" />
         </button>
       </section>
 
       {users.length > 1 && (
         <section>
           <h2 className="list-label">Who's free {dayWord}</h2>
-          <div className="who-grid">
-            {selRows.filter((r) => !r.u.me).map(({ u, state, blocks, evs = [] }) => {
+          <div className="who-row">
+            {selRows.filter((r) => !r.u.me).sort((a, b) => (a.state === 'free' ? -1 : 0) - (b.state === 'free' ? -1 : 0)).map(({ u, state, blocks, evs = [] }) => {
               const detail = [...blocks.filter((b) => b.start_time && b.kind !== 'free').map((b) => `${b.kind === 'work' ? 'work' : 'busy'} ${b.start_time}–${b.end_time}`),
-                ...evs.map((e) => `busy ${fmtTime(e.start_at)}–${fmtTime(e.end_at)}`)].slice(0, 2).join(', ');
+                ...evs.map((e) => `busy ${fmtTime(e.start_at)}–${fmtTime(e.end_at)}`)].slice(0, 1).join(', ');
               return (
                 <div key={u.id} className="who-cell" style={{ '--s': STATE[state].color }}>
-                  <span className="ring"><Avatar user={u} size={44} /></span>
+                  <span className="ring"><Avatar user={u} size={48} /></span>
                   <b>{u.display_name.split(' ')[0]}</b>
                   <small>{state === 'partial' && detail ? detail : STATE[state].label}</small>
                 </div>
@@ -171,7 +180,7 @@ export default function Calendar() {
 
       <section>
         <h2 className="list-label">You on {sel === today ? 'this day' : selDate.toLocaleDateString('en-GB', { weekday: 'long' })}</h2>
-        <div className="seg">
+        <div className="seg round">
           {[['free', 'Free'], ['busy', 'Busy'], ['work', 'At work']].map(([k, l]) => (
             <button key={k} className={myAllDay === k ? 'on' : ''} onClick={() => setDay(k)}>{l}</button>
           ))}
@@ -188,7 +197,7 @@ export default function Calendar() {
             ))}
           </div>
         )}
-        <button className="btn block" onClick={() => setBlockOpen(true)}><Icon name="block" size={18} />Block out a few hours</button>
+        <button className="btn block soft-btn" onClick={() => setBlockOpen(true)}><Icon name="clock" size={18} />Block out a few hours</button>
       </section>
 
       <Sheet open={blockOpen} onClose={() => setBlockOpen(false)} title="Block out time">

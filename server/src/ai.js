@@ -78,7 +78,7 @@ async function chat(messages, { json = false, stream = false, temperature = 0.2,
 
 /** Why Planner couldn't answer, in words the chat can show. */
 export function aiErrorText(e) {
-  if (aiMisconfigured) return 'LLM_BASE_URL is not set on the server';
+  if (aiMisconfigured && e?.kind !== 'http') return 'LLM_BASE_URL is not set on the server';
   if (e?.name === 'AbortError') return 'the model took too long';
   if (e?.kind === 'http') return `the model server said ${e.message}`;
   return 'cannot reach the model server';
@@ -198,13 +198,27 @@ ${convId ? `\nChat so far:\n${(await transcript(convId)) || '(empty)'}` : ''}`;
 
 // ---------------- conversation: Planner as a friend in the chat ----------------
 
+// So Planner can answer "how do I...?" about the app itself, correctly.
+const APP_GUIDE = `How Linkup works (use this when people ask about the app):
+- Chats: swipe a chat left to archive it (More has the rest), swipe right to mark it read or unread. Hold a chat to pin it (up to 3), mute it, add it to Favourites or a list, clear it or delete it. Archived chats sit at the top of the list.
+- In a chat: hold a message to react, reply, edit it (your own, for 15 minutes), star it, copy it or delete it for everyone. Swipe a message right to reply. The + button sends photos, documents, a plan, a video call or a chill invite. The mic records a voice message.
+- Tap the name at the top of a chat for contact or group info: media, links and docs, starred messages, search in the chat, mute, chat theme, groups in common, favourites, block, clear chat, delete or exit.
+- Tabs: Chats, Calendar (see who's free, block out time, add plans), Calls, Communities (several groups under one roof, plus an Announcements chat for everyone), and You (profile and settings).
+- You tab: Starred, Lists (your own chat filters), Broadcast messages (one message sent to each person separately), Linked devices (sign in on another device with a QR code), Account (passkeys, password, add or switch accounts, delete account), Privacy (last seen, read receipts, blocked people), Chats (wallpaper, enter to send, archive or clear all), Appearance (light or dark, colour, text size), Notifications, Camera and microphone, Storage and Help.
+- Inviting friends: You, then Invite (or the QR code button): share a link, show the QR code, or share your username.
+- On iPhone, add Linkup to the Home Screen (Share, then Add to Home Screen) to get notifications. Leaving the app during a call keeps the call going.
+- You (Planner) can be asked anything in any chat with @Planner, or in your own Planner chat.`;
+
 const PERSONA = `You are Planner, the assistant inside Linkup, a messenger for a small group of friends (time zone ${TZ}).
 You're warm, relaxed and quick, like the clever friend in the group chat. Talk naturally, in plain words.
 Keep it short: usually one to three sentences. Go longer only when someone asks for detail, steps or a list.
 You can talk about anything and answer any question: ideas, recommendations, facts, advice, maths, writing, jokes.
-You also help the friends plan, using their calendars below.
+You also help the friends plan, using their calendars below, and you know how the Linkup app works (see the guide).
 
 Rules:
+- Reply in the language the person wrote to you in.
+- Think before you answer, then give only the answer. Check dates and weekdays against the calendar below; never use a date that has passed.
+- For maths, work it out step by step in your head and give the result; for facts, only state what you're confident about.
 - For who is free and what's booked, only use the schedules and events listed below. Never invent plans, times or people.
 - If you're not sure of a fact, say so briefly instead of guessing.
 - Plain text only: no markdown, headings or tables. A short list with "- " is fine when it helps.
@@ -213,7 +227,11 @@ Rules:
 - When someone clearly asks you to book, plan, schedule or remind them of something, say in one line what you're setting up, then put this at the very end:
 <plan>{"title":"short title","type":"trip|hangout|meeting|call|event","date":"YYYY-MM-DD","end_date":null,"start_time":"HH:MM or null","end_time":"HH:MM or null","location":"","notes":"","participants":["username"],"reminder_minutes":60}</plan>
   Only add it when they ask for something to be booked or reminded. Never mention it or show JSON otherwise.
-  Resolve dates from the calendar, pick times when those people are free ("after work" means 17:30 or later), and a reminder (calls 15, hangouts 60, meetings 30, trips 1440).`;
+  Resolve dates from the calendar, pick times when those people are free ("after work" means 17:30 or later), and a reminder (calls 15, hangouts 60, meetings 30, trips 1440).
+  Example: "book padel with Sipho on Saturday at 10" becomes one line like "Done, padel with Sipho on Saturday at 10:00." then
+  <plan>{"title":"Padel with Sipho","type":"hangout","date":"<that Saturday's date>","end_date":null,"start_time":"10:00","end_time":"11:30","location":"","notes":"","participants":["<your username>","<sipho's username>"],"reminder_minutes":60}</plan>
+
+${APP_GUIDE}`;
 
 /** Who's in the conversation and what their next three weeks look like. */
 async function contextFor(members, requester, personal) {
@@ -226,13 +244,36 @@ Calendar (next 21 days):
 ${days.map((d) => `${d.date} = ${d.label}`).join('\n')}
 
 ${personal ? `You're talking with ${requester?.display_name} (username: ${requester?.username}) in their private chat with you. Their friends:` : 'People in this chat:'}
-${members.map((m) => `- ${m.display_name} (username: ${m.username})`).join('\n')}
+${members.map((m) => `- ${m.display_name} (username: ${m.username})${statusLine(m)}`).join('\n')}
 
 Schedules (busy / work blocks and events already booked):
-${await scheduleContext(members, days)}`;
+${await scheduleContext(members, days)}
+
+${requester ? `${requester.display_name.split(' ')[0]}'s upcoming plans:\n${await upcomingFor(requester.id)}` : ''}`;
 }
 
-const MEDIA_TEXT = { image: '[a photo]', voice: '[a voice message]', sticker: '[a sticker]', gif: '[a GIF]' };
+const STATUS_WORD = { available: 'available', busy: 'busy', work: 'at work', away: 'away' };
+const statusLine = (u) => {
+  const bits = [u.status && u.status !== 'invisible' ? STATUS_WORD[u.status] : null, u.status_text ? `"${String(u.status_text).slice(0, 60)}"` : null].filter(Boolean);
+  return bits.length ? ` · status: ${bits.join(', ')}` : '';
+};
+
+/** Plans someone is going to in the next weeks: what, when, where, with whom. */
+async function upcomingFor(uid) {
+  const rows = await q(`SELECT e.* FROM events e JOIN event_members m ON m.event_id = e.id
+    WHERE m.user_id = ? AND m.rsvp != 'declined' AND e.end_at >= ? ORDER BY e.start_at LIMIT 10`, [uid, new Date().toISOString()]);
+  if (!rows.length) return '- nothing booked';
+  const out = [];
+  for (const e of rows) {
+    const who = (await q(`SELECT u.display_name FROM event_members m JOIN users u ON u.id = m.user_id WHERE m.event_id = ? AND m.user_id != ? AND m.rsvp != 'declined'`, [e.id, uid]))
+      .map((r) => r.display_name.split(' ')[0]);
+    out.push(`- ${dateKey(e.start_at)} ${timeKey(e.start_at)}-${timeKey(e.end_at)} "${e.title}"${e.location ? ` at ${e.location}` : ''}${who.length ? ` with ${who.join(', ')}` : ''}`);
+  }
+  return out.join('\n');
+}
+
+const MEDIA_TEXT = { image: '[a photo]', voice: '[a voice message]', sticker: '[a sticker]', gif: '[a GIF]', file: '[a document]' };
+const CATCH_UP = /\b(catch (me|us) up|summari[sz]e|summary|what did i miss|what happened|recap|tl;?dr)\b/i;
 
 /** The recent chat as turns the model remembers: people are "user", Planner is "assistant". */
 async function historyTurns(convId, { personal, skipId, limit = 18 }) {
@@ -249,7 +290,7 @@ async function historyTurns(convId, { personal, skipId, limit = 18 }) {
       turns.push({ role: 'assistant', content: m.kind === 'plan' ? `[I suggested a plan: ${p?.title || m.body}${p?.start_at ? `, ${dateKey(p.start_at)} ${timeKey(p.start_at)}` : ''}${data.status === 'created' ? ', now booked' : ''}]` : m.body });
       continue;
     }
-    const text = [MEDIA_TEXT[m.kind], m.body && !MEDIA_TEXT[m.kind] ? m.body : m.kind === 'image' ? m.body : ''].filter(Boolean).join(' ').slice(0, 600);
+    const text = [MEDIA_TEXT[m.kind], m.body && !MEDIA_TEXT[m.kind] ? m.body : m.kind === 'image' || m.kind === 'file' ? m.body : ''].filter(Boolean).join(' ').slice(0, 600);
     turns.push({ role: 'user', content: personal ? text : `${names.get(m.sender_id) || 'Someone'}: ${text}` });
   }
   return turns;
@@ -313,18 +354,29 @@ export async function converse(convId, { requesterId, instruction = '', trigger 
   const members = ids.map((x) => byId.get(x)).filter(Boolean);
   const requester = byId.get(requesterId) || (await getUser(requesterId));
   const first = (requester?.display_name || 'Someone').split(' ')[0];
-  const history = await historyTurns(convId, { personal, skipId: trigger?.id });
+  // "Catch me up" reads much further back, and asks for a short summary.
+  const catchUp = CATCH_UP.test(instruction);
+  const history = await historyTurns(convId, { personal, skipId: trigger?.id, limit: catchUp ? 80 : 18 });
   const quoted = trigger?.quoted ? ` (replying to ${trigger.quoted.sender_name || 'someone'}: "${String(trigger.quoted.body || MEDIA_TEXT[trigger.quoted.kind] || '').slice(0, 300)}")` : '';
-  const ask = personal ? `${instruction}${quoted}` : `${first} asks you${quoted}: ${instruction}`;
+  let ask = personal ? `${instruction}${quoted}` : `${first} asks you${quoted}: ${instruction}`;
+  if (catchUp) ask += '\n(Catch them up on the chat above: the main points, what was decided, and anything waiting on them, as a few short "- " lines.)';
   const messages = [
     { role: 'system', content: `${PERSONA}\n\n${await contextFor(members, requester, personal)}` },
     ...alternate([...history, { role: 'user', content: ask || '(no text)' }]),
   ];
   let last = '';
-  const raw = await chat(messages, {
-    stream: true, temperature: 0.7,
-    onText: (t) => { const v = visibleText(t); if (v && v !== last) { last = v; onText?.(cleanReply(v)); } },
-  });
+  let raw;
+  try {
+    raw = await chat(messages, {
+      stream: true, temperature: 0.7,
+      onText: (t) => { const v = visibleText(t); if (v && v !== last) { last = v; onText?.(cleanReply(v)); } },
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw e;
+    raw = await chat(messages, { temperature: 0.5 }); // a hiccup mid-stream: ask once more, in one go
+  }
+  // An empty answer (some small models do this) gets one more try.
+  if (!visibleText(raw) && !/<plan>/i.test(raw)) raw = await chat(messages, { temperature: 0.4 }).catch(() => raw);
   const { reply, plan } = parseReply(raw);
   const solo = personal;
   return {

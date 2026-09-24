@@ -1,4 +1,4 @@
-import { q, run } from './db.js';
+import { q, run, prefsOf } from './db.js';
 import { notify } from './notify.js';
 import { formatWhen } from './time.js';
 import { internalSecret } from './auth.js';
@@ -34,7 +34,9 @@ export async function runReminders() {
     // Claim it first so two overlapping runs never send the same reminder twice.
     if (!(await run('UPDATE events SET reminder_sent = 1 WHERE id = ? AND reminder_sent = 0', [e.id]))) continue;
     const startMs = Date.parse(e.start_at);
-    const members = (await q(`SELECT user_id FROM event_members WHERE event_id = ? AND rsvp != 'declined'`, [e.id])).map((r) => r.user_id);
+    // Everyone going (or not answered yet), except anyone who turned reminders off.
+    const members = (await q(`SELECT m.user_id, u.prefs FROM event_members m JOIN users u ON u.id = m.user_id WHERE m.event_id = ? AND m.rsvp != 'declined'`, [e.id]))
+      .filter((r) => prefsOf(r).notify_reminders).map((r) => r.user_id);
     const minsLeft = Math.max(0, Math.round((startMs - nowMs) / 60000));
     const lead = minsLeft <= 1 ? 'now' : humanLead(Math.abs(minsLeft - e.reminder_minutes) <= 1 ? e.reminder_minutes : minsLeft);
     const actions = e.type === 'call' && e.call_room

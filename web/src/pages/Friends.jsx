@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { post, del } from '../lib/api.js';
 import { useApp, STATUS } from '../lib/store.jsx';
 import { Avatar, Sheet, Header, Icon, Orb, Empty } from '../components/ui.jsx';
@@ -6,7 +6,8 @@ import { ago } from '../lib/dates.js';
 import { shareInvite } from '../lib/share.js';
 
 export default function Friends() {
-  const { me, friends, loadFriends, navigate, toast, openPlanner } = useApp();
+  const { me, friends, loadFriends, navigate, toast, openPlanner, markAlerts } = useApp();
+  useEffect(() => { markAlerts({ kinds: ['friend_request', 'friend_accept'] }); }, []); // eslint-disable-line
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState('');
   const [sel, setSel] = useState(null);
@@ -46,7 +47,7 @@ export default function Friends() {
 
   return (
     <>
-      <Header back="/settings" title="Friends" right={<button className="icon-plain accent" onClick={() => setAddOpen(true)} aria-label="Add friend"><Icon name="userPlus" /></button>} />
+      <Header back="/you" title="Friends" right={<button className="icon-plain accent" onClick={() => setAddOpen(true)} aria-label="Add friend"><Icon name="userPlus" /></button>} />
 
       <section className="group-list me-row">
         <Avatar user={me} size={52} />

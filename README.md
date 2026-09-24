@@ -1,47 +1,61 @@
 # Linkup
 
-A private messenger for you and your friends that plans for you. It installs from a link (no app store) and follows your phone's light or dark mode.
+A private messenger for you and your friends that plans for you. It installs from a link (no app store), feels like a native app (the screen stays put when the keyboard opens), and follows your phone's light or dark mode, or the look you pick.
 
 **Tabs**
-- **Chats**: DMs and groups with read ticks, typing and online / last seen. **Planner** is pinned at the top. Search and filter by All, Unread or Groups.
-- **Calendar**: month view with your plans. Tap a day to see who's free, mark yourself busy or at work, or ask Planner to plan that day.
+- **Chats**: DMs and groups with read ticks, typing and online / last seen. **Planner** is pinned at the top. Search, and filter by All, Unread, Favourites, Groups or your own lists. The bell shows new notifications.
+- **Calendar**: a month card (swipe it to change month) with your plans. Tap a day for its plans, who's free, and to mark yourself busy or at work, or ask Planner to plan it.
 - **Calls**: quick-call your friends, see call history, missed calls in red, tap to call back.
-- Your avatar (top left of Chats) opens **Settings**: your status (Available, Busy, At work, Away, Invisible, plus a short line), friends, all plans, notifications, sign out.
+- **Communities**: several groups under one roof, plus an **Announcements** chat everyone in it gets. Add people, start groups, join the ones you want.
+- **You**: your profile, status and QR code, and every setting (below).
+
+**Chat list**
+- Swipe a chat left for **Archive** (a long swipe archives straight away, with Undo) and **More**; swipe right to mark it read or unread.
+- Hold a chat to **pin** it (up to 3 stay on top), mute it (8 hours, a week, always), add it to **Favourites** or a list, archive, clear or delete it.
+- Archived chats sit under **Archived** at the top of the list.
 
 **Chatting**
 - Messages appear the moment you tap send, with a clock until they're delivered. Without signal they stay marked **Not sent** and go out when you tap them or the phone is back online.
-- **Photos**: tap the camera in the message bar (or **+**, then **Photos**), pick up to 10, add a caption, send. Tap a photo to see it full screen; **Save** there (or hold it, **Save photo**) keeps it. Photos are shrunk on the phone first, so they send fast.
-- **Voice messages**: with nothing typed, the send button is a mic. Tap it, talk, then tap send (or the bin to throw it away). Tap play to listen, tap the waveform to jump, and switch between 1x, 1.5x and 2x.
-- Hold a message to react (one of the app's emoji, one each), **Reply**, **Copy** or **Delete for everyone** (your own messages). Swipe a message right to reply. Tap a quote to jump to the original.
-- A chat opens where you left off, under an "unread messages" line. Scroll up for older messages; when you're scrolled up, a button takes you to the latest and counts what came in.
+- **Photos**, **documents** (PDF, Word, Excel, slides, text, zip, up to 4 MB) and **voice messages**. Links in messages open in the browser.
+- Hold a message to react, **Reply**, **Edit** (your own, for 15 minutes; it shows "edited"), **Star**, **Copy**, or **Delete for everyone**. Swipe a message right to reply. Tap a quote to jump to the original, even if it's far back.
+- The message box grows as you type. Enter sends (turn that off in You, Chats, then Enter makes a new line).
+- Tap the **name at the top** for contact or group info: media, links and docs, starred messages, search in the chat, notifications (mute), chat theme, groups in common, add to favourites or a list, archive, clear chat, block, and delete chat or exit group. Group admins can rename the group, add a description and picture, and add or remove people.
+
+**You tab**
+- **Starred**, **Lists** (your own chat filters), **Broadcast messages** (one message to several friends, each in their own chat with you), **Linked devices** (see where you're signed in, log out others, link a new device with a QR code that works once for 10 minutes).
+- **Account**: passkeys (sign in with Face ID, Touch ID or the screen lock), change password (signs out your other devices), add another account and switch between them, sign out, delete your account.
+- **Privacy**: last seen and online (Everyone or Nobody), read receipts, blocked people. **Chats**: wallpaper, enter to send, keep chats archived, archive or clear all. **Appearance**: automatic, light or dark, five colours, message text size.
+- **Notifications**: turn on for this phone, send a test, choose messages, groups, reactions and reminders, and whether previews show what was said. **Camera and microphone**: allow them before your first call, or the exact steps to switch them back on if they were blocked. **Storage**, **Help**.
+
+**Notifications**
+- Opening Linkup clears its notifications off the lock screen, and the number on the app icon is only what's still unread (muted and archived chats don't count).
+- Opening a chat clears that chat's alerts; the Calls tab clears missed calls; a plan's page clears its invites; opening the Notifications screen clears the rest. **Clear** empties it.
+- Chat notifications are titled with the person (or group) and show their picture where the phone allows it.
 
 **Getting your friends in**
-- Sign up (you need the `REGISTRATION_CODE` you set). In Chats, tap **Share invite link**, or go to Settings, Friends, **Invite link**.
+- Sign up (you need the `REGISTRATION_CODE` you set). Then **Invite friends** (Chats, or You, Invite, or the QR code button): your QR code to scan with any camera, **Share invite link**, copy the link or your username, or add someone by their username.
 - Your friend opens the link, creates an account (no code needed) and lands straight in a chat with you. You're friends automatically.
 
 **Planner**
-- Ask it anything in the **Planner** chat: ideas, facts, advice, a message to write, a joke. It remembers the conversation, and its answer appears as it's being written.
-- Say "gym with Sipho friday after work" and it books it: it picks a time you're both free and sets a reminder (15 min before calls, 30 before meetings, 1 hour before hangouts, 1 day before trips).
-- In any other chat, ask it in front of everyone: start a message with **@Planner** (or "Planner," / "Hey Planner"), or type your question and tap the orb. Reply to one of its messages to keep talking to it, or hold any message and tap **Ask Planner** to ask about that message. Its answer quotes the question.
-- Type a question in the search bar on Chats and tap **Ask Planner**.
+- Ask it anything in the **Planner** chat: ideas, facts, advice, a message to write, a joke, how to do something in the app. It remembers the conversation, answers in the language you write in, and its answer appears as it's being written.
+- It knows your upcoming plans, your friends' status and who's free. Say "gym with Sipho friday after work" and it books it: it picks a time you're both free and sets a reminder (15 min before calls, 30 before meetings, 1 hour before hangouts, 1 day before trips).
+- "@Planner catch me up" in a busy chat reads far back and sums up what you missed.
+- In any other chat, ask it in front of everyone: start a message with **@Planner** (or "Planner," / "Hey Planner"), or type your question and tap the orb. Reply to one of its messages to keep talking to it, or hold any message and tap **Ask Planner**. Its answer quotes the question.
 - With nothing typed, the orb (or **+**, then **Plan it**) reads the chat and posts a plan card. Anyone can tap **Book it**.
-- **+** in a chat also has Photos, New plan, Video call and Chill invite.
 
 **Make it yours**
-- Tap your picture in **Settings** to pick one of 20 profile pictures (or keep your initials).
-- The smiley in the message bar opens **Emoji**, **Stickers** and **GIFs**: 10 of each, all drawn for Linkup. Emoji go into your message (a message that's only emoji shows big); stickers and GIFs send straight away.
-- Empty screens and the welcome screen have small animated scenes with the same characters.
-- All of it is generated by `node scripts/art/make.mjs` (uses the root dev dependencies; set `CHROMIUM_PATH` to use an installed Chromium). Edit `scripts/art/sets.mjs` to add more, then run it again.
+- A friendly new logo, 20 profile pictures (everyone starts with one), group and community pictures, and the app's own emoji, stickers and GIFs.
+- All the art is generated by `node scripts/art/make.mjs` (set `CHROMIUM_PATH` to use an installed Chromium). The logo is `web/public/brand/logo.svg`; the icons in `web/public/icons/` are rendered from it.
 
 **Calls**
-- A call rings for 45 seconds. While it rings, the notification is sent again every 6 seconds, so a locked phone keeps alerting. The caller sees "Ringing…", then "declined", "No answer" or "Call ended", and the friend gets "Missed video call" if they didn't pick up.
-- Leaving the call screen (or pressing back) keeps the call going as a small pill at the top, with a live timer. Tap it to go back.
+- A call rings for 45 seconds. While it rings, the notification is sent again every 6 seconds, so a locked phone keeps alerting.
+- Leaving the call screen keeps the call going as a small pill at the top, with a live timer. Leaving the app keeps it going too: where the phone supports it the other person's video floats in picture-in-picture (there's also a button for it), and the lock screen's media controls show who you're with, with mute and hang up.
 - In a video call, tap your small video to swap it with theirs, and drag it to any corner.
 - Calls on mobile data need a relay: see section 4.
-- What a home-screen web app can't do: use the iPhone's real call screen or Dynamic Island, or play a custom ringtone while the phone is locked. Locked phones use the normal notification sound and vibration, and Silent mode or Focus can mute them.
+- What a home-screen web app can't do: put a call on the iPhone's Dynamic Island as a Live Activity or use the real call screen (those need a native iOS app), switch on the camera or microphone by itself (the phone always asks first), or play a custom ringtone while the phone is locked.
 
 **Updates**
-- After you deploy, open apps show **New version ready** with an **Update** button. Tapping it reloads into the new version. Settings shows the version you're on.
+- After you deploy, open apps show **New version ready** with an **Update** button. Tapping it reloads into the new version. You, Help shows the version you're on.
 
 Stack: React + Vite PWA with a service worker for Web Push, and a Node 22 + Express API. On Vercel the API runs as a function on Postgres (Neon), with live events over Pusher and reminders over QStash. Run locally, the same code uses an embedded database and a built-in live stream, so `npm start` needs nothing else. Web Push uses VAPID, so it needs no Firebase or Apple developer account.
 
@@ -98,11 +112,11 @@ Phones need HTTPS, so share it with `tailscale funnel --bg 8080`. The PC has to 
 
 **Android**: open the link in **Chrome**, tap **Install app** (or ⋮, then Add to Home screen).
 
-When the app opens, it asks to turn on notifications: tap **Turn on notifications**, then **Allow**. If you tap **Not now**, it asks again in a few days, and you can always do it in **Settings, Notifications**. The **Get set up** card on Chats shows what's left (profile picture, notifications, inviting a friend).
+When the app opens, it asks to turn on notifications: tap **Turn on notifications**, then **Allow**. If you tap **Not now**, it asks again in a few days, and you can always do it in **You, Notifications**. The **Get set up** card on Chats shows what's left (profile picture, notifications, inviting a friend).
 
-Tap **Send test** in Settings, Notifications to confirm, then lock the phone and check the notification shows up.
+Tap **Send a test** in You, Notifications to confirm, then lock the phone and check the notification shows up.
 
-Easiest: share your invite link (Chats, Share invite link). Friends who open it sign up without a code and are connected to you straight away. People can also sign up with the `REGISTRATION_CODE` and add each other by username in **Settings, Friends**.
+Easiest: share your invite link or QR code (You, Invite). Friends who open it sign up without a code and are connected to you straight away. People can also sign up with the `REGISTRATION_CODE` and add each other by username (You, Invite, Add by username).
 
 ## 4. Video calls on mobile data
 
@@ -129,6 +143,9 @@ server/src/
   app.js        Express app: CORS, the /api router, errors
   index.js      npm start: app + built PWA + reminder timer on one port
   api.js        REST API: auth, friends, availability, events, chat, invites, calls signalling, presence, notifications
+  features/     account.js (devices, link codes, passkeys, password, preferences, delete),
+                chats.js (per-chat settings, clear/hide, groups, info, search, stars, edits, blocks, lists, broadcasts),
+                communities.js
   db.js         Postgres: Neon via DATABASE_URL, or embedded PGlite in server/data/
   realtime.js   live events: Pusher, or an SSE stream when running locally; presence from heartbeats
   ai.js         Planner: builds context (calendar, schedules, chat) -> LLM -> plan JSON
@@ -138,7 +155,9 @@ server/src/
 scripts/ollama-gate.js  lets the Vercel app reach Ollama on your PC with a secret
 web/
   public/sw.js  service worker: shows push content, action buttons, offline shell
-  src/pages/    Chats, ChatRoom, Calendar, Calls, Settings, Friends, Plans, Event, Alerts, Call, Invite
+  public/brand/ the logo (icons are rendered from it)
+  src/pages/    Chats, ChatRoom, ChatInfo, Calendar, Calls, Communities, You (+ YouSettings, YouAccount, YouCollections),
+                Friends, Plans, Event, Alerts, Call, Invite
 ```
 
 Test that two people can sign up and chat: start a fresh server (`DATA_DIR=/tmp/linkup-test REGISTRATION_CODE=test npm start`), then run `REGISTRATION_CODE=test npm run test:e2e`. To use an already-installed Chromium instead of the Playwright download, set `CHROMIUM_PATH=/path/to/chrome`. Point `APP_URL` at a deployment to run the same test there.

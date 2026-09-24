@@ -53,6 +53,23 @@ export async function syncPush(vapidPublicKey) {
   }
 }
 
+/** Close what's sitting on the lock screen / in the notification centre: all of it, or the ones that match. */
+export async function closeNotifications(match = () => true) {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (!reg?.getNotifications) return;
+    for (const n of await reg.getNotifications()) if (match(n)) n.close();
+  } catch { /* not supported here */ }
+}
+
+/** The number on the app icon. */
+export function setBadge(n) {
+  try {
+    if (!navigator.setAppBadge) return;
+    (n > 0 ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+  } catch { /* not supported */ }
+}
+
 export async function disablePush() {
   if (!pushSupported()) return;
   const reg = await navigator.serviceWorker.ready;
