@@ -10,7 +10,7 @@ export const DATA_DIR = process.env.DATA_DIR || path.join(SERVER_DIR, 'data');
 export const dbKind = URL ? 'postgres' : 'local';
 
 const NOW = `(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`;
-const SCHEMA_VERSION = '6';
+const SCHEMA_VERSION = '7';
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
@@ -272,6 +272,15 @@ CREATE TABLE IF NOT EXISTS link_codes (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL,
   used INTEGER NOT NULL DEFAULT 0
+);
+-- v7: friends nudging each other to turn notifications on
+ALTER TABLE users ADD COLUMN IF NOT EXISTS nudged_at TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS nudged_by TEXT;
+CREATE TABLE IF NOT EXISTS nudges (
+  from_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (from_id, to_id)
 );
 `;
 

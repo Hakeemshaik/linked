@@ -18,6 +18,26 @@ export function applyLook(p = {}) {
   try { localStorage.setItem(KEY, JSON.stringify({ theme: p.theme, accent: p.accent, text_size: p.text_size, wallpaper: p.wallpaper })); } catch { /* private mode */ }
 }
 
+/**
+ * Change the look smoothly: the new theme spreads out in a circle from where you tapped (or fades in),
+ * as one GPU-drawn picture, so nothing stutters. Browsers without view transitions switch instantly.
+ */
+export function changeLook(update, at) {
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!document.startViewTransition || reduce) { update(); return; }
+  const root = document.documentElement;
+  root.classList.add(at ? 'vt-reveal' : 'vt-fade');
+  const t = document.startViewTransition(update);
+  if (at) {
+    t.ready.then(() => {
+      const r = Math.hypot(Math.max(at.x, innerWidth - at.x), Math.max(at.y, innerHeight - at.y));
+      root.animate({ clipPath: [`circle(0px at ${at.x}px ${at.y}px)`, `circle(${r}px at ${at.x}px ${at.y}px)`] },
+        { duration: 520, easing: 'cubic-bezier(.2, .8, .2, 1)', pseudoElement: '::view-transition-new(root)' });
+    }).catch(() => {});
+  }
+  t.finished.finally(() => root.classList.remove('vt-reveal', 'vt-fade'));
+}
+
 export function bootLook() {
   try { applyLook(JSON.parse(localStorage.getItem(KEY) || '{}')); } catch { /* first visit */ }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { get, post, del, patch } from '../lib/api.js';
@@ -10,6 +10,7 @@ import RichText, { emojiOnly } from '../components/RichText.jsx';
 import { EMOJI, emojiUrl, stickerUrl, gifUrl } from '../lib/art.js';
 import { uploadMedia, mediaUrl, savePhoto } from '../lib/media.js';
 import { cachedMessages, cacheMessages } from '../lib/cache.js';
+import { enablePush, pushState } from '../lib/push.js';
 import { PhotoSend, PhotoViewer, photoSize } from '../components/Photos.jsx';
 import { VoiceNote, RecordingBar, useRecorder, canRecord, clock } from '../components/Voice.jsx';
 
@@ -141,6 +142,28 @@ function PlanCard({ msg, members, onDone }) {
   );
 }
 
+/* A friend asked you to turn notifications on: one tap does it. */
+function NudgeCard({ m, mine, to }) {
+  const { config, toast } = useApp();
+  const [st, setSt] = useState(pushState);
+  const who = (mine ? to?.display_name : m.sender?.display_name)?.split(' ')[0] || 'them';
+  const turnOn = async () => {
+    try { await enablePush(config?.vapidPublicKey); post('/nudges/seen').catch(() => {}); toast({ title: 'Notifications on', body: `${who} can reach you now` }); }
+    catch (e) { toast({ title: 'Notifications are off', body: e.message, ms: 7000 }); }
+    setSt(pushState());
+  };
+  return (
+    <div id={`m-${m.id}`} className="nudge-card">
+      <span className="nudge-ic"><Icon name="bell" size={20} /></span>
+      <b>{mine ? `You asked ${who} to turn on notifications` : `${who} asked you to turn on notifications`}</b>
+      <small>{mine ? "They'll be asked the next time they open Linkup." : "So calls and messages reach you even when Linkup is closed."}</small>
+      {!mine && st === 'default' && <button className="btn primary small" onClick={turnOn}>Turn on notifications</button>}
+      {!mine && st === 'granted' && <small className="ok nudge-done"><Icon name="check" size={14} /> Notifications are on</small>}
+      <span className="nudge-time">{fmtTime(m.created_at)}</span>
+    </div>
+  );
+}
+
 /* Reveals Planner's words one by one, only for messages that just arrived. */
 function Reveal({ text, fresh }) {
   const words = text.split(/(\s+)/);
@@ -196,20 +219,37 @@ function ReactPill({ r, meId, onOpen }) {
   );
 }
 
-/* One message row. Hold it (or right-click) for the menu, swipe it right to reply. */
+/* One message row. Hold it (or right-click) for the menu, swipe it right to reply.
+   The swipe moves the bubble directly each frame (no re-render), so it keeps up with your finger. */
 function Row({ id, side, first, pop, onHold, onSwipe, onTap, children }) {
   const ref = useRef(null);
+  const col = useRef(null);
+  const icon = useRef(null);
   const g = useRef(null);
   const dxRef = useRef(0);
-  const [dx, setDx] = useState(0);
-  const offset = (v) => { dxRef.current = v; setDx(v); };
+  const frame = useRef(0);
+  const offset = (v, settle = false) => {
+    dxRef.current = v;
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      if (!col.current) return;
+      ref.current?.classList.toggle('swiping', !!v && !settle);
+      col.current.style.transform = v ? `translate3d(${v}px,0,0)` : '';
+      if (icon.current) {
+        const p = Math.min(1, v / SWIPE);
+        icon.current.style.opacity = String(p);
+        icon.current.style.transform = `scale(${0.5 + p * 0.5})`;
+      }
+    });
+  };
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
   const hold = () => onHold?.(ref.current?.querySelector('.bubble, .media-msg'));
 
   const down = (e) => {
     g.current = null;
     if ((!onHold && !onSwipe) || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const s = { x: e.clientX, y: e.clientY, id: e.pointerId };
-    if (onHold) s.t = setTimeout(() => { s.fired = true; navigator.vibrate?.(12); hold(); }, HOLD_MS);
+    if (onHold) s.t = setTimeout(() => { s.fired = true; navigator.vibrate?.(12); window.getSelection?.()?.removeAllRanges(); hold(); }, HOLD_MS);
     g.current = s;
   };
   const move = (e) => {
@@ -234,7 +274,7 @@ function Row({ id, side, first, pop, onHold, onSwipe, onTap, children }) {
     clearTimeout(s.t);
     if (s.swiping) {
       if (dxRef.current >= SWIPE) onSwipe();
-      offset(0);
+      offset(0, true);
       g.current = { fired: true };
     } else if (!s.fired) g.current = null;
   };
@@ -251,14 +291,13 @@ function Row({ id, side, first, pop, onHold, onSwipe, onTap, children }) {
     g.current = { fired: true };
     hold();
   };
-  const p = Math.min(1, dx / SWIPE);
   return (
-    <div ref={ref} id={`m-${id}`} className={`row-msg ${side} ${first ? 'first' : ''} ${pop ? 'pop' : ''} ${dx ? 'swiping' : ''}`}
+    <div ref={ref} id={`m-${id}`} className={`row-msg ${side} ${first ? 'first' : ''} ${pop ? 'pop' : ''}`}
       onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
       onPointerLeave={(e) => e.pointerType === 'mouse' && !g.current?.swiping && up()}
       onClickCapture={click} onContextMenu={context}>
-      <div className="msg-col" style={dx ? { transform: `translateX(${dx}px)` } : undefined} onClick={onTap}>
-        {dx > 0 && <span className="swipe-reply" style={{ opacity: p, transform: `scale(${0.5 + p * 0.5})` }}><Icon name="reply" size={18} /></span>}
+      <div ref={col} className="msg-col" onClick={onTap}>
+        {onSwipe && <span ref={icon} className="swipe-reply" style={{ opacity: 0 }}><Icon name="reply" size={18} /></span>}
         {children}
       </div>
     </div>
@@ -329,6 +368,9 @@ function MessageMenu({ at, side, canReact, reactions, meId, names, onReact, acti
   );
 }
 
+const MessageList = memo(({ draw }) => draw.current(),
+  (a, b) => a.msgs === b.msgs && a.conv === b.conv && a.markId === b.markId && a.q === b.q && a.meId === b.meId && a.ai === b.ai);
+
 const SKELETON = [['in', 58, 36], ['in', 36, 36], ['out', 52, 50], ['in', 66, 50], ['out', 34, 36], ['out', 60, 36], ['in', 44, 36]];
 
 export function ChatView({ convId: id }) {
@@ -354,6 +396,7 @@ export function ChatView({ convId: id }) {
   const [viewer, setViewer] = useState(null);
   const [editing, setEditing] = useState(null); // your message being edited
   const [search, setSearch] = useState(qs.get('search') ? { q: '', results: [], i: 0 } : null);
+  const [aiOnline, setAiOnline] = useState(true);
   const fileRef = useRef(null);
   const docRef = useRef(null);
   const [jump, setJump] = useState(false);
@@ -373,6 +416,8 @@ export function ChatView({ convId: id }) {
   const unreadMark = useRef(null);
   const loadingOlder = useRef(false);
   const draftRef = useRef(null);
+  const aiChecked = useRef(false);
+  const drawRef = useRef(null);
   const msgsRef = useRef(msgs);
   msgsRef.current = msgs;
 
@@ -818,12 +863,16 @@ export function ChatView({ convId: id }) {
   );
 
   const planner = !!conv.is_ai;
+  if (planner && !aiChecked.current) {
+    aiChecked.current = true;
+    get('/ai/status').then((r) => setAiOnline(r.online)).catch(() => {});
+  }
   const recording = rec.state !== 'idle';
   const voiceOk = !planner && canRecord();
   const others = conv.members.filter((m) => !m.me);
   const blockedOther = !conv.is_group && !planner && others[0]?.blocked;
   const planMembers = planner ? [self, ...friends.friends].filter(Boolean) : conv.members;
-  const sub = planner ? (thinking ? (draft ? 'writing…' : 'thinking…') : 'ask me anything, I plan too')
+  const sub = planner ? (thinking ? (draft ? 'writing…' : 'thinking…') : aiOnline ? 'ask me anything, I plan too' : "offline: my computer isn't running")
     : typing ? `${conv.is_group ? `${typing.display_name.split(' ')[0]} is ` : ''}typing…`
     : conv.kind === 'announcements' ? `Announcements · ${conv.members.length} member${conv.members.length === 1 ? '' : 's'}`
     : conv.is_group ? others.map((m) => m.display_name.split(' ')[0]).join(', ') + ', You'
@@ -920,6 +969,7 @@ export function ChatView({ convId: id }) {
   const renderMsg = (m, first) => {
     if (m.kind === 'system') return <div key={keyOf(m)} className="sys"><span>{m.body}</span></div>;
     const isNew = initialIds.current && !initialIds.current.has(m.id);
+    if (m.kind === 'nudge') return <NudgeCard key={keyOf(m)} m={m} mine={m.sender_id === meId} to={others[0]} />;
     if (m.kind === 'plan') return (
       <div key={keyOf(m)} id={`m-${m.id}`} className={`row-msg in ${first ? 'first' : ''} ${isNew ? 'pop' : ''}`}>
         <PlanCard msg={m} members={planMembers} onDone={openEvent} />
@@ -950,6 +1000,24 @@ export function ChatView({ convId: id }) {
     days[days.length - 1].list.push(m);
   }
   const mark = unreadMark.current;
+  // The message list only redraws when the messages (or what they show) change, not on every keystroke.
+  drawRef.current = () => days.map(({ d, at, list }) => {
+    let prev = null;
+    return (
+      <section className="day" key={d}>
+        <div className="day-sep"><span>{relDay(at)}</span></div>
+        {list.flatMap((m) => {
+          const unread = mark?.id === m.id;
+          if (unread) prev = null;
+          const senderKey = m.sender_id || 'ai';
+          const first = senderKey !== prev;
+          prev = m.kind === 'system' ? null : senderKey;
+          const row = renderMsg(m, first);
+          return unread ? [<div key="unread-mark" id="unread-mark" className="unread-sep"><span>{mark.n} unread message{mark.n > 1 ? 's' : ''}</span></div>, row] : [row];
+        })}
+      </section>
+    );
+  });
   const menuMsg = menu && (msgs.find((y) => y.id === menu.m.id) || menu.m);
   const menuActions = (m) => (m.failed ? [
     { label: 'Try again', icon: 'send', run: () => { setMenu(null); deliver(m); } },
@@ -1001,23 +1069,7 @@ export function ChatView({ convId: id }) {
       <div className="messages-wrap">
         <div className={`messages wallpaper ${conv.theme ? `theme-${conv.theme}` : ''}`} ref={listRef} onScroll={onScroll}>
           {more && <div className="older">{older && <span className="spinner sm" />}</div>}
-          {days.map(({ d, at, list }) => {
-            let prev = null;
-            return (
-              <section className="day" key={d}>
-                <div className="day-sep"><span>{relDay(at)}</span></div>
-                {list.flatMap((m) => {
-                  const unread = mark?.id === m.id;
-                  if (unread) prev = null;
-                  const senderKey = m.sender_id || 'ai';
-                  const first = senderKey !== prev;
-                  prev = m.kind === 'system' ? null : senderKey;
-                  const row = renderMsg(m, first);
-                  return unread ? [<div key="unread-mark" id="unread-mark" className="unread-sep"><span>{mark.n} unread message{mark.n > 1 ? 's' : ''}</span></div>, row] : [row];
-                })}
-              </section>
-            );
-          })}
+          <MessageList msgs={msgs} conv={conv} markId={mark?.id} q={search?.q} meId={meId} ai={aiOnline} draw={drawRef} />
           {draft ? (
             <div className="row-msg in first">
               <div className={`bubble streaming ${!planner ? 'ai' : ''}`}>

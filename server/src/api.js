@@ -18,6 +18,8 @@ import { background } from './background.js';
 import * as account from './features/account.js';
 import * as chatsFeature from './features/chats.js';
 import * as communitiesFeature from './features/communities.js';
+import * as nudgesFeature from './features/nudges.js';
+import * as calendarFeature from './features/calendar.js';
 
 export const api = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -86,7 +88,7 @@ api.get('/health', wrap(async (req, res) => {
     calls: relayKind ? `relay: ${relayKind}` : 'direct only: add a TURN relay (see README) or calls on mobile data may not connect',
     media: `${(stored / 1048576).toFixed(1)} MB of photos and voice messages`,
     reminders: { qstash: 'qstash + daily sweep', timer: 'local timer', 'cron-only': 'daily sweep only: set QSTASH_TOKEN for on-time reminders' }[remindersKind],
-    planner: aiMisconfigured ? 'not set: add LLM_BASE_URL (your tunnel URL ending in /v1) and redeploy' : aiInfo.model,
+    planner: aiMisconfigured ? 'not set: add LLM_BASE_URL (your tunnel URL ending in /v1) and redeploy' : `${aiInfo.model}${aiInfo.fallback ? `, backup: ${aiInfo.fallback}` : ''}`,
   });
 }));
 
@@ -116,7 +118,7 @@ api.post('/auth/register', wrap(async (req, res) => {
   const count = (await one('SELECT COUNT(*)::int AS c FROM users')).c;
   const color = COLORS[count % COLORS.length];
   // Everyone starts with one of the app's characters (so notifications show a face); they can change it in You.
-  const avatar = STARTER_PICS[crypto.randomInt(STARTER_PICS.length)];
+  const avatar = STARTER_PICS.includes(req.body?.avatar) ? req.body.avatar : STARTER_PICS[crypto.randomInt(STARTER_PICS.length)];
   try {
     await run('INSERT INTO users (id, username, display_name, password_hash, color, avatar) VALUES (?,?,?,?,?,?)', [
       uid, username, (display_name || username).trim().slice(0, 40), await bcrypt.hash(password, 10), color, avatar,
@@ -247,7 +249,7 @@ api.post('/invite-link/accept', wrap(async (req, res) => {
   res.json({ conversation_id: dm, friend: publicUser(inviter) });
 }));
 
-api.get('/me', (req, res) => res.json({ user: publicUser(req.user) }));
+api.get('/me', (req, res) => res.json({ user: publicUser(req.user), nudge: req.user.nudged_at ? { at: req.user.nudged_at, by: req.user.nudged_by } : null }));
 
 const ART_ID = /^[a-z]{2,20}$/; // ids of the app's own art (profile pictures, stickers, GIFs)
 
@@ -293,6 +295,7 @@ api.post('/push/subscribe', wrap(async (req, res) => {
   const sub = req.body?.subscription;
   if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) return bad(res, 'Bad subscription');
   await saveSubscription(req.user.id, sub);
+  if (req.user.nudged_at) await run('UPDATE users SET nudged_at = NULL, nudged_by = NULL WHERE id = ?', [req.user.id]);
   res.json({ ok: true });
 }));
 api.post('/push/unsubscribe', wrap(async (req, res) => {
@@ -741,6 +744,7 @@ function messageText(kind, body, data) {
   if (kind === 'image') return body ? `Photo: ${lockScreenText(body)}` : 'Photo';
   if (kind === 'voice') return `Voice message (${clock(data?.duration || 0)})`;
   if (kind === 'file') return `Document: ${body}`;
+  if (kind === 'nudge') return 'Asked you to turn on notifications';
   return lockScreenText(body);
 }
 
@@ -838,7 +842,7 @@ async function aiRespond(convId, requesterId, mode, instruction, trigger = null)
     else if (mode === 'plan' && !reply) await postMessage(convId, null, 'ai', "I couldn't find a plan in the chat yet. Mention what, when and where and tap Plan it again.");
   } catch (e) {
     console.warn('[ai] error', e.message);
-    await postMessage(convId, null, 'ai', `I'm offline right now (${aiErrorText(e)}). Try again in a bit.`);
+    await postMessage(convId, null, 'ai', `I can't answer right now: ${aiErrorText(e)}. Try again in a bit.`);
   } finally {
     await run('UPDATE conversations SET ai_busy_until = NULL WHERE id = ?', [convId]);
     await emitToUsers(members, 'ai:thinking', { conversation_id: convId, on: false });
@@ -1259,11 +1263,11 @@ api.post('/ai/schedule', wrap(async (req, res) => {
 // ---------- AI status ----------
 api.get('/ai/status', wrap(async (req, res) => {
   try {
-    if (aiMisconfigured) return res.json({ online: false, model: aiInfo.model });
+    if (aiMisconfigured) return res.json({ online: false, model: aiInfo.model, backup: aiInfo.fallback });
     const r = await fetch(`${aiInfo.base}/models`, { headers: aiHeaders, signal: AbortSignal.timeout(4000) });
-    res.json({ online: r.ok, model: aiInfo.model });
+    res.json({ online: r.ok || !!aiInfo.fallback, model: r.ok ? aiInfo.model : aiInfo.fallback || aiInfo.model, backup: aiInfo.fallback });
   } catch {
-    res.json({ online: false, model: aiInfo.model });
+    res.json({ online: !!aiInfo.fallback, model: aiInfo.fallback || aiInfo.model, backup: aiInfo.fallback });
   }
 }));
 
@@ -1287,3 +1291,5 @@ const helpers = { wrap, bad, postMessage, convSummary, systemMessage, findDM, ne
 account.routes(api, helpers);
 chatsFeature.routes(api, helpers);
 communitiesFeature.routes(api, helpers);
+nudgesFeature.routes(api, helpers);
+calendarFeature.routes(api, helpers);

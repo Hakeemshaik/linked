@@ -4,7 +4,7 @@ A private messenger for you and your friends that plans for you. It installs fro
 
 **Tabs**
 - **Chats**: DMs and groups with read ticks, typing and online / last seen. **Planner** is pinned at the top. Search, and filter by All, Unread, Favourites, Groups or your own lists. The bell shows new notifications.
-- **Calendar**: a month card (swipe it to change month) with your plans. Tap a day for its plans, who's free, and to mark yourself busy or at work, or ask Planner to plan it.
+- **Calendar**: the **Planner bar** at the top ("padel with Sipho on Saturday") finds real times when everyone's free and books one with a tap. **This week** shows what's next, how full the week is and the evening most friends are free. Pick friends under **Free with** to ring the days you're all free. **Month** view (swipe to change month) or **Week** view with a timeline of the day: tap a green free window to plan straight into it.
 - **Calls**: quick-call your friends, see call history, missed calls in red, tap to call back.
 - **Communities**: several groups under one roof, plus an **Announcements** chat everyone in it gets. Add people, start groups, join the ones you want.
 - **You**: your profile, status and QR code, and every setting (below).
@@ -17,7 +17,7 @@ A private messenger for you and your friends that plans for you. It installs fro
 **Chatting**
 - Messages appear the moment you tap send, with a clock until they're delivered. Without signal they stay marked **Not sent** and go out when you tap them or the phone is back online.
 - **Photos**, **documents** (PDF, Word, Excel, slides, text, zip, up to 4 MB) and **voice messages**. Links in messages open in the browser.
-- Hold a message to react, **Reply**, **Edit** (your own, for 15 minutes; it shows "edited"), **Star**, **Copy**, or **Delete for everyone**. Swipe a message right to reply. Tap a quote to jump to the original, even if it's far back.
+- Hold a message (it never selects text) to react, **Reply**, **Edit** (your own, for 15 minutes; it shows "edited"), **Star**, **Copy**, or **Delete for everyone**. Swipe a message right to reply. Tap a quote to jump to the original, even if it's far back.
 - The message box grows as you type. Enter sends (turn that off in You, Chats, then Enter makes a new line).
 - Tap the **name at the top** for contact or group info: media, links and docs, starred messages, search in the chat, notifications (mute), chat theme, groups in common, add to favourites or a list, archive, clear chat, block, and delete chat or exit group. Group admins can rename the group, add a description and picture, and add or remove people.
 
@@ -28,6 +28,8 @@ A private messenger for you and your friends that plans for you. It installs fro
 - **Notifications**: turn on for this phone, send a test, choose messages, groups, reactions and reminders, and whether previews show what was said. **Camera and microphone**: allow them before your first call, or the exact steps to switch them back on if they were blocked. **Storage**, **Help**.
 
 **Notifications**
+- A phone only gets notifications once they're turned on there. You, Notifications lists friends who have them off: **Nudge** one or all (a card in your chat with them, and their app asks the moment they next open it), or send a reminder link by WhatsApp or text. Contact info shows it too.
+- In-app banners drop in under the top bar, so back and the header buttons always work. Flick one up or sideways to dismiss it.
 - Opening Linkup clears its notifications off the lock screen, and the number on the app icon is only what's still unread (muted and archived chats don't count).
 - Opening a chat clears that chat's alerts; the Calls tab clears missed calls; a plan's page clears its invites; opening the Notifications screen clears the rest. **Clear** empties it.
 - Chat notifications are titled with the person (or group) and show their picture where the phone allows it.
@@ -37,6 +39,7 @@ A private messenger for you and your friends that plans for you. It installs fro
 - Your friend opens the link, creates an account (no code needed) and lands straight in a chat with you. You're friends automatically.
 
 **Planner**
+- If the computer running Planner is off, it says exactly that (for example "the tunnel to the model is offline"). Add a backup model with `LLM_FALLBACK_BASE_URL`, `LLM_FALLBACK_MODEL` and `LLM_FALLBACK_API_KEY` (any OpenAI-compatible API) and it answers from there instead.
 - Ask it anything in the **Planner** chat: ideas, facts, advice, a message to write, a joke, how to do something in the app. It remembers the conversation, answers in the language you write in, and its answer appears as it's being written.
 - It knows your upcoming plans, your friends' status and who's free. Say "gym with Sipho friday after work" and it books it: it picks a time you're both free and sets a reminder (15 min before calls, 30 before meetings, 1 hour before hangouts, 1 day before trips).
 - "@Planner catch me up" in a busy chat reads far back and sums up what you missed.
@@ -44,13 +47,15 @@ A private messenger for you and your friends that plans for you. It installs fro
 - With nothing typed, the orb (or **+**, then **Plan it**) reads the chat and posts a plan card. Anyone can tap **Book it**.
 
 **Make it yours**
-- A friendly new logo, 20 profile pictures (everyone starts with one), group and community pictures, and the app's own emoji, stickers and GIFs.
+- A friendly logo, 20 profile pictures (pick yours when you sign up), group and community pictures, and the app's own emoji, stickers and GIFs.
+- Changing the theme or colour spreads out smoothly from where you tapped. Chat themes show a live preview.
 - All the art is generated by `node scripts/art/make.mjs` (set `CHROMIUM_PATH` to use an installed Chromium). The logo is `web/public/brand/logo.svg`; the icons in `web/public/icons/` are rendered from it.
 
 **Calls**
 - A call rings for 45 seconds. While it rings, the notification is sent again every 6 seconds, so a locked phone keeps alerting.
 - Leaving the call screen keeps the call going as a small pill at the top, with a live timer. Leaving the app keeps it going too: where the phone supports it the other person's video floats in picture-in-picture (there's also a button for it), and the lock screen's media controls show who you're with, with mute and hang up.
 - In a video call, tap your small video to swap it with theirs, and drag it to any corner.
+- A call that can't connect (or loses its connection) says so, "Couldn't connect. Network error", and goes back to the app by itself.
 - Calls on mobile data need a relay: see section 4.
 - What a home-screen web app can't do: put a call on the iPhone's Dynamic Island as a Live Activity or use the real call screen (those need a native iOS app), switch on the camera or microphone by itself (the phone always asks first), or play a custom ringtone while the phone is locked.
 
@@ -145,7 +150,8 @@ server/src/
   api.js        REST API: auth, friends, availability, events, chat, invites, calls signalling, presence, notifications
   features/     account.js (devices, link codes, passkeys, password, preferences, delete),
                 chats.js (per-chat settings, clear/hide, groups, info, search, stars, edits, blocks, lists, broadcasts),
-                communities.js
+                communities.js, nudges.js (turn-on-notifications nudges),
+                calendar.js (free-together windows, weekly brief, the Planner bar's suggestions)
   db.js         Postgres: Neon via DATABASE_URL, or embedded PGlite in server/data/
   realtime.js   live events: Pusher, or an SSE stream when running locally; presence from heartbeats
   ai.js         Planner: builds context (calendar, schedules, chat) -> LLM -> plan JSON

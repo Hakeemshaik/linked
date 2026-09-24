@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { api, get, post, getToken, setToken } from './api.js';
 import { connectRealtime } from './realtime.js';
 import { unlockAudioOnTouch } from './sound.js';
 import { registerSW, syncPush, closeNotifications, setBadge } from './push.js';
 import { cacheFor, cached, cache, clearCache } from './cache.js';
-import { applyLook } from './look.js';
+import { applyLook, changeLook } from './look.js';
 import { rememberAccount, forgetAccount } from './accounts.js';
 
 // Tokens from before devices were tracked carry no session id; swap them for one that shows in Linked devices.
@@ -36,6 +37,7 @@ export function AppProvider({ children, navigate }) {
   }), []);
   const [config, setConfig] = useState(() => cached('config') || null);
   const [prefs, setPrefsState] = useState(() => (getToken() && cached('prefs')) || null);
+  const [nudge, setNudge] = useState(null); // a friend asked you to turn notifications on
   const [friends, setFriends] = useState(() => (getToken() && cached('friends')) || { friends: [], incoming: [], outgoing: [] });
   const [unread, setUnread] = useState(0);
   const [chatUnread, setChatUnread] = useState(0);
@@ -59,7 +61,7 @@ export function AppProvider({ children, navigate }) {
   const toast = useCallback((t) => {
     const tid = Math.random().toString(36).slice(2);
     setToasts((x) => [...x.slice(-1), { ...t, tid }]); // at most two banners at once
-    setTimeout(() => setToasts((x) => x.filter((y) => y.tid !== tid)), t.ms || 3800);
+    setTimeout(() => setToasts((x) => x.filter((y) => y.tid !== tid)), t.ms || 3200);
   }, []);
   const dismissToast = (tid) => setToasts((x) => x.filter((y) => y.tid !== tid));
 
@@ -91,8 +93,15 @@ export function AppProvider({ children, navigate }) {
     navRef.current('/', { replace: true });
   };
   // Settings that follow you to every device: saved at once here, then on the server.
-  const savePrefs = useCallback(async (patchBody) => {
-    setPrefsState((p) => { const next = { ...(p || {}), ...patchBody }; applyLook(next); cache('prefs', next); return next; });
+  // at = where it was tapped: a new theme or colour spreads out from there.
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  const savePrefs = useCallback(async (patchBody, at) => {
+    const next = { ...(prefsRef.current || {}), ...patchBody };
+    const looks = ['theme', 'accent', 'text_size', 'wallpaper'].some((k) => k in patchBody && patchBody[k] !== prefsRef.current?.[k]);
+    const apply = () => { flushSync(() => setPrefsState(next)); applyLook(next); };
+    if (looks) changeLook(apply, at); else apply();
+    cache('prefs', next);
     try {
       const r = await api('/me/prefs', { method: 'PATCH', body: patchBody });
       setPrefsState(r.prefs); cache('prefs', r.prefs); applyLook(r.prefs);
@@ -116,7 +125,7 @@ export function AppProvider({ children, navigate }) {
   useEffect(() => {
     if (!token) return;
     try { sessionStorage.removeItem('linkup_adding'); } catch { /* ignore */ }
-    get('/me').then((r) => { setMe(r.user); rememberAccount(r.user, getToken()); }).catch(() => {});
+    get('/me').then((r) => { setMe(r.user); setNudge(r.nudge || null); rememberAccount(r.user, getToken()); }).catch(() => {});
     get('/me/prefs').then((r) => { setPrefsState(r.prefs); cache('prefs', r.prefs); applyLook(r.prefs); }).catch(() => {});
     if (!hasSession(token)) post('/auth/refresh').then((r) => { if (r.token) { setToken(r.token); setTok(r.token); } }).catch(() => {});
     loadFriends();
@@ -210,8 +219,8 @@ export function AppProvider({ children, navigate }) {
   const value = useMemo(() => ({
     token, me, setMe, config, friends, loadFriends, unread, setUnread, chatUnread, setChatUnread, loadUnread, markAlerts,
     toasts, toast, dismissToast, incoming, setIncoming, rt, login, logout, navigate, openPlanner, aiConvId,
-    prefs: prefs || {}, savePrefs, switchAccount, addAccount,
-  }), [token, me, config, friends, unread, chatUnread, toasts, incoming, rt, navigate, aiConvId, prefs]); // eslint-disable-line
+    prefs: prefs || {}, savePrefs, switchAccount, addAccount, nudge, setNudge,
+  }), [token, me, config, friends, unread, chatUnread, toasts, incoming, rt, navigate, aiConvId, prefs, nudge]); // eslint-disable-line
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

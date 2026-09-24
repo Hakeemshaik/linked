@@ -32,7 +32,7 @@ export function Lists() {
   return (
     <>
       <Header back="/you" title="Lists" right={<button className="icon-plain accent" onClick={() => setEdit({ name: '', conversation_ids: [] })} aria-label="New list"><Icon name="plus" size={26} /></button>} />
-      <p className="muted small pad-x">Group chats your way, like Family, Work or Trip crew. Each list is a filter at the top of Chats.</p>
+      <p className="note">Group chats your way, like Family, Work or Trip crew. Each list is a filter at the top of Chats.</p>
       {!lists ? <div className="spinner" /> : lists.length === 0 ? (
         <Empty title="No lists yet" action={<button className="btn primary mt" onClick={() => setEdit({ name: '', conversation_ids: [] })}>Create a list</button>}>Pick a few chats and give them a name.</Empty>
       ) : (
@@ -84,7 +84,7 @@ export function Broadcasts() {
   return (
     <>
       <Header back="/you" title="Broadcasts" right={<button className="icon-plain accent" onClick={() => setCreate({ name: '', member_ids: [] })} aria-label="New broadcast"><Icon name="plus" size={26} /></button>} />
-      <p className="muted small pad-x">Send one message to several friends at once. Each gets it in their own chat with you, and replies come back privately.</p>
+      <p className="note">Send one message to several friends at once. Each gets it in their own chat with you, and replies come back privately.</p>
       {!list ? <div className="spinner" /> : list.length === 0 ? (
         <Empty title="No broadcast lists" action={<button className="btn primary mt" onClick={() => setCreate({ name: '', member_ids: [] })}>New broadcast</button>}>Great for party invites or quick updates to a few people.</Empty>
       ) : (

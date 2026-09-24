@@ -57,7 +57,7 @@ const pipSpot = (corner) => {
  * the server, so /sync (every 1.5s while connecting) picks up anything the live channel dropped.
  */
 export default function Call({ room, minimized, onClose }) {
-  const { rt, me, navigate } = useApp();
+  const { rt, me, navigate, toast } = useApp();
   const [local, setLocal] = useState(null);
   const [peers, setPeers] = useState([]); // [{ peerId, user, stream, mic, cam, state, since }]
   const [mic, setMic] = useState(true);
@@ -83,12 +83,13 @@ export default function Call({ room, minimized, onClose }) {
   const onCallScreen = () => location.pathname.startsWith('/call/');
   const minimize = () => navigate(window.history.length > 1 ? -1 : '/');
   const back = () => { onClose?.(); if (onCallScreen()) minimize(); };
-  // Show why the call is over for a moment, then go back.
-  const end = (why) => {
+  // Show why the call is over for a moment, then go back. A call that couldn't connect says why there too.
+  const end = (why, { fail = false } = {}) => {
     if (endTimer.current) return;
     setEnded(why);
     localRef.current?.getTracks().forEach((t) => t.stop());
-    endTimer.current = setTimeout(back, 1800);
+    if (fail) navigator.vibrate?.([60, 40, 60]);
+    endTimer.current = setTimeout(() => { back(); if (fail) toast({ title: why, body: 'You can try again from the chat', icon: 'alert' }); }, fail ? 2200 : 1800);
   };
   useEffect(() => () => clearTimeout(endTimer.current), []);
 
@@ -137,7 +138,7 @@ export default function Call({ room, minimized, onClose }) {
       pc.ontrack = (e) => upsert(peerId, { stream: e.streams[0] || new MediaStream([e.track]) });
       const onState = () => {
         const st = stateOf(pc);
-        upsert(peerId, { state: st });
+        if (st !== entry.state) { entry.state = st; upsert(peerId, { state: st, at: Date.now() }); }
         entry.lostAt = st === 'reconnecting' ? entry.lostAt || Date.now() : 0;
         // The offering side restarts ICE when a connection fails.
         if (st === 'failed' && entry.initiator && entry.restarts < 3) { entry.restarts++; offer(peerId, entry, true).catch(() => {}); }
@@ -189,7 +190,7 @@ export default function Call({ room, minimized, onClose }) {
     const onJoined = (p) => mine(p) && makePeer(p.peerId, p.user, false);
     const onLeft = (p) => mine(p) && drop(p.peerId);
     const onMedia = (p) => mine(p) && upsert(p.peerId, { mic: p.mic, cam: p.cam });
-    const onAnswer = (p) => p.room_id === room && setRinging((l) => l.map((r) => (r.invite_id === p.invite_id ? { ...r, status: p.accept ? 'accepted' : 'declined' } : r)));
+    const onAnswer = (p) => p.room_id === room && setRinging((l) => l.map((r) => (r.invite_id === p.invite_id ? { ...r, status: p.accept ? 'accepted' : 'declined', at: Date.now() } : r)));
 
     let syncTimer, giveUp;
     const join = async () => {
@@ -238,7 +239,7 @@ export default function Call({ room, minimized, onClose }) {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 } }, audio: { echoCancellation: true, noiseSuppression: true } });
       } catch {
         try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); setCam(false); }
-        catch { setError('Camera and microphone are blocked. Allow them for this site and try again.'); return; }
+        catch { setError('Camera and microphone are blocked'); end('Camera and microphone are blocked. Allow them in You, Camera and microphone', { fail: true }); return; }
       }
       if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
       localRef.current = stream;
@@ -259,7 +260,9 @@ export default function Call({ room, minimized, onClose }) {
         syncTimer = setTimeout(sync, 1200);
         // Nobody picked up in time: stop ringing them (leaving marks it missed) and close the call.
         giveUp = setTimeout(() => { if (!everJoined.current) end(res.ringing?.length ? 'No answer' : 'Call ended'); }, res.ring_ms || 45000);
-      } catch (e) { end(e.message); }
+      } catch (e) {
+        end(/fetch|network|load failed/i.test(e.message) || !navigator.onLine ? "Couldn't connect. Network error" : e.message, { fail: true });
+      }
     })();
     window.addEventListener('pagehide', leave);
 
@@ -281,6 +284,27 @@ export default function Call({ room, minimized, onClose }) {
       setPeers([]);
     };
   }, [rt, room]); // eslint-disable-line
+
+  // Can't connect (or the connection is gone): say so and go back, instead of hanging on "Connecting…".
+  const offlineSince = useRef(0);
+  useEffect(() => {
+    if (ended || stage !== 'in') return;
+    const t = setInterval(() => {
+      const now = Date.now();
+      offlineSince.current = navigator.onLine ? 0 : offlineSince.current || now;
+      if (offlineSince.current && now - offlineSince.current > 8000) return end('No internet connection', { fail: true });
+      if (peers.some((p) => p.state === 'connected')) return;
+      const waited = (p) => now - (p.at || p.since || now);
+      if (peers.length && peers.every((p) => (p.state === 'failed' && waited(p) > 8000) || (p.state === 'connecting' && waited(p) > 25000))) {
+        return end("Couldn't connect. Network error", { fail: true });
+      }
+      if (peers.length && everJoined.current && peers.every((p) => p.state === 'reconnecting' && waited(p) > 15000)) return end('Connection lost', { fail: true });
+      // They answered but their phone never joined.
+      const answered = ringing.filter((r) => r.status === 'accepted');
+      if (!peers.length && answered.length && answered.every((r) => now - (r.at || now) > 25000)) end("Couldn't connect. Network error", { fail: true });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [peers, ringing, ended, stage]); // eslint-disable-line
 
   // Everyone else hung up: the call is over.
   useEffect(() => {

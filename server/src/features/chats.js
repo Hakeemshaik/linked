@@ -157,6 +157,7 @@ export function routes(api, h) {
       counts: { media: n.image || 0, voice: n.voice || 0, docs: n.file || 0, links: links.n, starred: stars.n },
       groups_in_common: common,
       blocked: other ? !!(await one('SELECT 1 AS x FROM blocks WHERE user_id = ? AND blocked_id = ?', [req.user.id, other.id])) : false,
+      notifications: other ? !!(await one('SELECT 1 AS x FROM push_subscriptions WHERE user_id = ? LIMIT 1', [other.id])) : null,
     });
   }));
   api.get('/conversations/:id/media', wrap(async (req, res) => {

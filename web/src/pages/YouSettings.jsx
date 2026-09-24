@@ -36,7 +36,7 @@ export function Profile() {
       <div className="group-list form-list">
         <input value={name} maxLength={40} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== me?.display_name && save({ display_name: name }).then((ok) => ok && toast({ title: 'Name saved', ms: 1500 }))} aria-label="Your name" />
       </div>
-      <p className="muted small pad-x">This is what friends see. They add you with your username.</p>
+      <p className="note">This is what friends see. They add you with your username.</p>
       <div className="group-list mt">
         <Cell icon="user" color="#8A8A99" title="Username" value={`@${me?.username}`} />
         <Cell icon="status" color={st.color} title="Status" value={`${st.label}${me?.status_text ? ` · ${me.status_text}` : ''}`} onClick={() => setStatusOpen(true)} />
@@ -69,7 +69,7 @@ export function Privacy() {
       <div className="group-list">
         <Cell title="Last seen and online" value={prefs.last_seen === 'nobody' ? 'Nobody' : 'Everyone'} onClick={() => setSheet(true)} />
       </div>
-      <p className="muted small pad-x">With Nobody, friends see neither when you're online nor when you were last here, and you still see theirs.</p>
+      <p className="note">With Nobody, friends see neither when you're online nor when you were last here, and you still see theirs.</p>
       <div className="group-list mt">
         <ToggleCell title="Read receipts" sub="Turn off and friends don't see when you've read their messages. You won't see theirs either." on={prefs.read_receipts !== false} onChange={(v) => savePrefs({ read_receipts: v })} />
       </div>
@@ -103,7 +103,7 @@ export function Blocked() {
           ))}
         </div>
       )}
-      <p className="muted small pad-x mt">Blocked people can't message or call you, and aren't told.</p>
+      <p className="note mt">Blocked people can't message or call you, and aren't told.</p>
     </>
   );
 }
@@ -118,12 +118,12 @@ export function ChatSettings() {
       <div className="list-label">Wallpaper</div>
       <div className="wall-grid">
         {WALLPAPERS.map(([k, label]) => (
-          <button key={k} className={`wall-swatch wallpaper wp-${k} ${(prefs.wallpaper || 'dots') === k ? 'on' : ''}`} onClick={() => savePrefs({ wallpaper: k })}>
+          <button key={k} className={`wall-swatch wallpaper wp-${k} ${(prefs.wallpaper || 'dots') === k ? 'on' : ''}`} onClick={(e) => savePrefs({ wallpaper: k }, { x: e.clientX, y: e.clientY })}>
             <span className="sw-in" /><span className="sw-out" /><b>{label}</b>
           </button>
         ))}
       </div>
-      <p className="muted small pad-x">For one chat only: open it, tap its name, then Chat theme.</p>
+      <p className="note">For one chat only: open it, tap its name, then Chat theme.</p>
       <div className="group-list mt">
         <ToggleCell title="Enter is send" sub="On a keyboard, Enter sends. Shift+Enter makes a new line." on={prefs.enter_sends !== false} onChange={(v) => savePrefs({ enter_sends: v })} />
         <ToggleCell title="Keep chats archived" sub="Archived chats stay archived when a new message comes in" on={prefs.keep_archived !== false} onChange={(v) => savePrefs({ keep_archived: v })} />
@@ -156,17 +156,17 @@ export function Appearance() {
       <div className="list-label">Theme</div>
       <div className="theme-pick">
         {[['system', 'Automatic'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => (
-          <button key={k} className={`theme-card t-${k} ${theme === k ? 'on' : ''}`} onClick={() => savePrefs({ theme: k })}>
+          <button key={k} className={`theme-card t-${k} ${theme === k ? 'on' : ''}`} onClick={(e) => savePrefs({ theme: k }, { x: e.clientX, y: e.clientY })}>
             <span className="mini-phone"><i /><i /><i /></span><b>{l}</b>
             <span className={`radio ${theme === k ? 'on' : ''}`} />
           </button>
         ))}
       </div>
-      <p className="muted small pad-x">Automatic follows your phone's light and dark mode.</p>
+      <p className="note">Automatic follows your phone's light and dark mode.</p>
       <div className="list-label">Colour</div>
       <div className="accent-row">
         {ACCENTS.map(([k, l, hex]) => (
-          <button key={k} className={`accent-dot ${(prefs.accent || 'violet') === k ? 'on' : ''}`} style={{ '--c': hex }} onClick={() => savePrefs({ accent: k })} aria-label={l}>
+          <button key={k} className={`accent-dot ${(prefs.accent || 'violet') === k ? 'on' : ''}`} style={{ '--c': hex }} onClick={(e) => savePrefs({ accent: k }, { x: e.clientX, y: e.clientY })} aria-label={l}>
             {(prefs.accent || 'violet') === k && <Icon name="check" size={20} />}
           </button>
         ))}
@@ -179,6 +179,52 @@ export function Appearance() {
         <div className="row-msg in first"><div className="bubble"><span className="text">Braai at mine on Saturday?</span><span className="meta">18:02</span></div></div>
         <div className="row-msg out first"><div className="bubble"><span className="text">I'm in! Bringing the salad</span><span className="meta">18:03<Icon name="ticks" size={16} className="tick read" /></span></div></div>
       </div>
+    </>
+  );
+}
+
+/* Friends whose phones can't get notifications yet: nudge them (a card in your chat, and their app asks at once). */
+function NudgeFriends() {
+  const { toast } = useApp();
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState('');
+  const load = () => get('/nudges').then((r) => setList(r.friends)).catch(() => setList([]));
+  useEffect(() => { load(); }, []);
+  if (!list || !list.length) return null;
+  const off = list.filter((f) => !f.notifications);
+  const recent = (f) => f.nudged_at && Date.now() - Date.parse(f.nudged_at) < 12 * 3600e3;
+  const one = async (f) => {
+    setBusy(f.id);
+    try { await post(`/nudges/${f.id}`); toast({ title: `Nudged ${f.display_name.split(' ')[0]}`, body: "They'll be asked the next time they open Linkup" }); load(); }
+    catch (e) { toast({ title: 'Not sent', body: e.message }); } finally { setBusy(''); }
+  };
+  const all = async () => {
+    setBusy('all');
+    try { const r = await post('/nudges'); toast({ title: r.sent ? `Nudged ${r.sent} friend${r.sent > 1 ? 's' : ''}` : 'Everyone was nudged recently' }); load(); }
+    catch (e) { toast({ title: 'Not sent', body: e.message }); } finally { setBusy(''); }
+  };
+  const share = async () => {
+    const url = `${location.origin}/you/notifications`;
+    const text = 'Turn on Linkup notifications so my calls and messages reach you:';
+    try { if (navigator.share) { await navigator.share({ title: 'Linkup notifications', text, url }); return; } } catch (e) { if (e?.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(`${text} ${url}`); toast({ title: 'Reminder copied', body: 'Paste it in WhatsApp or a text' }); } catch { toast({ title: 'Could not copy' }); }
+  };
+  return (
+    <>
+      <div className="list-label">Friends</div>
+      <div className="group-list">
+        {off.length === 0 && <div className="row-item cell"><span className="tile-ic" style={{ '--c': 'var(--ok)' }}><Icon name="check" size={19} /></span><span className="grow"><b>All your friends get notifications</b></span></div>}
+        {off.map((f) => (
+          <div key={f.id} className="row-item">
+            <Avatar user={f} size={40} />
+            <span className="grow"><b>{f.display_name}</b><small className="friend-push"><Icon name="bellOff" size={13} />Notifications off</small></span>
+            <button className="btn small" disabled={!!busy || recent(f)} onClick={() => one(f)}>{recent(f) ? 'Nudged' : 'Nudge'}</button>
+          </div>
+        ))}
+        {off.length > 1 && <Cell icon="bell" color="#E8A21B" title={`Nudge all ${off.length}`} chevron={false} onClick={busy ? undefined : all} />}
+        <Cell icon="share" color="#3B8EF0" title="Send a reminder another way" sub="Share a link by WhatsApp, text or email" chevron={false} onClick={share} />
+      </div>
+      <p className="note">A phone only gets notifications after they're turned on there. A nudge puts a card in your chat, and their app asks the moment they next open it.</p>
     </>
   );
 }
@@ -229,7 +275,8 @@ export function NotificationSettings() {
       <div className="group-list mt">
         <ToggleCell icon="eye" color="#14A36B" title="Show previews" sub="Off: notifications say who it's from, not what they wrote" on={prefs.previews !== false} onChange={(v) => savePrefs({ previews: v })} />
       </div>
-      <p className="muted small pad-x">Calls always ring. To quiet one chat, open it, tap its name, then Notifications.</p>
+      <p className="note">Calls always ring. To quiet one chat, open it, tap its name, then Notifications.</p>
+      <NudgeFriends />
       <div className="group-list mt">
         <Cell icon="bell" color="#8A8A99" title="Recent alerts" onClick={() => navigate('/alerts')} />
       </div>
@@ -283,7 +330,7 @@ export function Permissions() {
         {row('camera', 'camera', 'Camera', 'For video calls')}
         {row('microphone', 'mic', 'Microphone', 'For calls and voice messages')}
       </div>
-      <p className="muted small pad-x">A website can't switch these on by itself: your phone always asks you first. If you tapped Don't Allow before, the steps below turn it back on.</p>
+      <p className="note">A website can't switch these on by itself: your phone always asks you first. If you tapped Don't Allow before, the steps below turn it back on.</p>
       <Sheet open={!!help} onClose={() => setHelp(null)} title={`Turn on the ${help?.toLowerCase()}`}>
         <ol className="steps-list">{settingsSteps(help || 'Camera').map((s, i) => <li key={i}><b>{i + 1}</b>{s}</li>)}</ol>
         <button className="btn primary block" onClick={() => { setHelp(null); refresh(); }}>Done</button>

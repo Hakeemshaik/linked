@@ -3,7 +3,7 @@ import { get, patch } from '../lib/api.js';
 import { APP_VERSION } from '../lib/update.js';
 import { useApp, STATUS } from '../lib/store.jsx';
 import { Avatar, Header, Icon, Sheet, Cell, Confirm } from '../components/ui.jsx';
-import InviteSheet from '../components/InviteSheet.jsx';
+import InviteSheet from '../components/Invite.jsx';
 import { disablePush, pushState } from '../lib/push.js';
 import { permissionStates } from '../lib/perms.js';
 import { savedAccounts } from '../lib/accounts.js';

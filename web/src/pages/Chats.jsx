@@ -6,7 +6,7 @@ import { Avatar, GroupAvatar, Header, Sheet, Empty, Icon, Orb, Confirm } from '.
 import { fmtTime, dayKey, addDays } from '../lib/dates.js';
 import RichText from '../components/RichText.jsx';
 import SetupCard from '../components/SetupCard.jsx';
-import InviteSheet from '../components/InviteSheet.jsx';
+import InviteSheet from '../components/Invite.jsx';
 import { clock } from '../components/Voice.jsx';
 import { cached, cache } from '../lib/cache.js';
 
@@ -24,18 +24,50 @@ const OPEN_LEFT = 150; // More + Archive
 const OPEN_RIGHT = 84; // Read / Unread
 const FULL = 0.55; // of the row's width: a long swipe does the action straight away
 
-/* One chat in the list. Swipe left for More and Archive, right for read/unread; hold for everything else. */
-function SwipeRow({ c, onOpen, onHold, onArchive, onRead, onMore, openId, setOpenId, leaving, children }) {
-  const ref = useRef(null);
+/* One chat in the list. Swipe left for More and Archive, right for read/unread; hold for everything else.
+   The drag moves the row directly, frame by frame, without re-rendering anything, so it stays smooth. */
+let openRow = null; // only one row stays swiped open: { close, isOpen }
+function SwipeRow({ c, onOpen, onHold, onArchive, onRead, onMore, leaving, children }) {
+  const wrap = useRef(null);
+  const face = useRef(null);
+  const more = useRef(null);
+  const arch = useRef(null);
+  const read = useRef(null);
   const g = useRef(null);
-  const [dx, setDx] = useState(0);
   const dxRef = useRef(0);
-  const set = (v) => { dxRef.current = v; setDx(v); };
-  useEffect(() => { if (openId !== c.id && dxRef.current) set(0); }, [openId]); // eslint-disable-line
+  const frame = useRef(0);
+  const [side, setSide] = useState(''); // which actions are underneath: 'left' | 'right' | ''
+  const sideRef = useRef('');
+
+  const paint = (v, settle = false) => {
+    dxRef.current = v;
+    const s = v > 0 ? 'left' : v < 0 ? 'right' : '';
+    if (s !== sideRef.current && s) { sideRef.current = s; setSide(s); }
+    cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      const el = wrap.current;
+      if (!el) return;
+      const w = g.current?.w || el.offsetWidth;
+      const full = Math.abs(v) > w * FULL;
+      el.classList.toggle('settle', settle);
+      el.classList.toggle('full', full);
+      face.current.style.transform = v ? `translate3d(${v}px,0,0)` : '';
+      if (read.current) read.current.style.width = `${Math.max(0, v)}px`;
+      if (more.current) more.current.style.width = full ? '0px' : `${Math.max(0, -v) / 2}px`;
+      if (arch.current) arch.current.style.width = full ? `${Math.max(0, -v)}px` : `${Math.max(0, -v) / 2}px`;
+      if (settle && !v) setTimeout(() => { if (!dxRef.current) { sideRef.current = ''; setSide(''); } }, 320);
+    });
+  };
+  const paintRef = useRef(paint);
+  paintRef.current = paint;
+  const handle = useRef(null);
+  if (!handle.current) handle.current = { close: () => paintRef.current(0, true), isOpen: () => dxRef.current !== 0 };
+  const close = () => { paint(0, true); if (openRow === handle.current) openRow = null; };
+  useEffect(() => () => { cancelAnimationFrame(frame.current); if (openRow === handle.current) openRow = null; }, []);
 
   const down = (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    const s = { x: e.clientX, y: e.clientY, id: e.pointerId, base: dxRef.current, w: ref.current?.offsetWidth || 360 };
+    const s = { x: e.clientX, y: e.clientY, id: e.pointerId, base: dxRef.current, w: wrap.current?.offsetWidth || 360 };
     s.t = setTimeout(() => { if (!s.swiping) { s.fired = true; navigator.vibrate?.(12); onHold(); } }, HOLD_MS);
     g.current = s;
   };
@@ -44,21 +76,22 @@ function SwipeRow({ c, onOpen, onHold, onArchive, onRead, onMore, openId, setOpe
     if (!s || s.fired || s.id !== e.pointerId) return;
     const mx = e.clientX - s.x, my = e.clientY - s.y;
     if (!s.swiping) {
-      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+      if (Math.abs(mx) < 7 && Math.abs(my) < 7) return;
       clearTimeout(s.t);
-      if (Math.abs(mx) < Math.abs(my) * 1.3) { g.current = null; return; }
+      if (Math.abs(mx) < Math.abs(my) * 1.2) { g.current = null; return; }
       s.swiping = true;
-      setOpenId(c.id);
+      if (openRow && openRow !== handle.current) openRow.close();
+      openRow = handle.current;
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     }
     let v = s.base + mx;
     // Past the buttons it gets heavier; a long enough swipe does the action.
-    if (v < -OPEN_LEFT) v = -OPEN_LEFT + (v + OPEN_LEFT) * 0.75;
-    if (v > OPEN_RIGHT) v = OPEN_RIGHT + (v - OPEN_RIGHT) * 0.6;
-    v = Math.max(-s.w * 0.92, Math.min(s.w * 0.7, v));
+    if (v < -OPEN_LEFT) v = -OPEN_LEFT + (v + OPEN_LEFT) * 0.8;
+    if (v > OPEN_RIGHT) v = OPEN_RIGHT + (v - OPEN_RIGHT) * 0.7;
+    v = Math.max(-s.w * 0.95, Math.min(s.w * 0.75, v));
     const crossed = (x) => Math.abs(x) > s.w * FULL;
     if (crossed(v) !== crossed(dxRef.current)) navigator.vibrate?.(10);
-    set(v);
+    paint(v);
   };
   const up = () => {
     const s = g.current;
@@ -66,44 +99,42 @@ function SwipeRow({ c, onOpen, onHold, onArchive, onRead, onMore, openId, setOpe
     clearTimeout(s.t);
     if (s.swiping) {
       const v = dxRef.current;
-      if (v < -s.w * FULL) { set(-s.w); onArchive(); }
-      else if (v > s.w * FULL) { set(0); onRead(); }
-      else if (v < -OPEN_LEFT / 2) set(-OPEN_LEFT);
-      else if (v > OPEN_RIGHT / 2) set(OPEN_RIGHT);
-      else { set(0); setOpenId(null); }
+      if (v < -s.w * FULL) { paint(-s.w, true); onArchive(); }
+      else if (v > s.w * FULL) { close(); onRead(); }
+      else if (v < -OPEN_LEFT / 2) paint(-OPEN_LEFT, true);
+      else if (v > OPEN_RIGHT / 2) paint(OPEN_RIGHT, true);
+      else close();
       g.current = { fired: true };
     } else if (!s.fired) g.current = null;
   };
   const click = (e) => {
     e.preventDefault();
     if (g.current?.fired) { e.stopPropagation(); g.current = null; return; }
-    if (dxRef.current) { set(0); setOpenId(null); return; }
+    if (dxRef.current) { close(); return; }
+    if (openRow && openRow !== handle.current && openRow.isOpen()) { openRow.close(); openRow = null; return; }
     onOpen();
   };
   const unreadish = c.unread > 0 || c.marked_unread;
-  const w = ref.current?.offsetWidth || 360;
   return (
-    <div ref={ref} className={`swipe ${leaving ? 'leaving' : ''} ${dx ? 'moving' : ''}`} onContextMenu={(e) => { e.preventDefault(); onHold(); }}>
-      {dx > 0 && (
+    <div ref={wrap} className={`swipe ${leaving ? 'leaving' : ''}`} onContextMenu={(e) => { e.preventDefault(); onHold(); }}>
+      {side === 'left' && (
         <div className="swipe-under left">
-          <button className="swipe-btn" style={{ '--c': 'var(--blue)', width: Math.max(OPEN_RIGHT, dx) }} onClick={() => { set(0); onRead(); }}>
+          <button ref={read} className="swipe-btn" style={{ '--c': 'var(--blue)' }} onClick={() => { close(); onRead(); }}>
             <Icon name={unreadish ? 'chatRead' : 'chatUnread'} size={22} /><span>{unreadish ? 'Read' : 'Unread'}</span>
           </button>
         </div>
       )}
-      {dx < 0 && (
+      {side === 'right' && (
         <div className="swipe-under right">
-          {-dx < w * FULL && (
-            <button className="swipe-btn" style={{ '--c': '#8A8A99', width: -dx / 2 }} onClick={() => { set(0); setOpenId(null); onMore(); }}>
-              <Icon name="more" size={22} /><span>More</span>
-            </button>
-          )}
-          <button className="swipe-btn" style={{ '--c': 'var(--accent)', width: -dx < w * FULL ? -dx / 2 : -dx }} onClick={() => { set(-w); onArchive(); }}>
+          <button ref={more} className="swipe-btn more" style={{ '--c': '#8A8A99' }} onClick={() => { close(); onMore(); }}>
+            <Icon name="more" size={22} /><span>More</span>
+          </button>
+          <button ref={arch} className="swipe-btn" style={{ '--c': 'var(--accent)' }} onClick={() => { paint(-(wrap.current?.offsetWidth || 360), true); onArchive(); }}>
             <Icon name="archive" size={22} /><span>{c.archived ? 'Unarchive' : 'Archive'}</span>
           </button>
         </div>
       )}
-      <div role="button" tabIndex={0} className="row-item swipe-face" style={{ transform: dx ? `translateX(${dx}px)` : undefined }}
+      <div ref={face} role="button" tabIndex={0} className="row-item swipe-face"
         onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onClick={click}
         onKeyDown={(e) => e.key === 'Enter' && onOpen()}>
         {children}
@@ -112,7 +143,12 @@ function SwipeRow({ c, onOpen, onHold, onArchive, onRead, onMore, openId, setOpe
   );
 }
 
+// The rows cascade in once, when the app opens; coming back to Chats shows them at once.
+let cascaded = false;
+
 export default function Chats({ archivedView = false }) {
+  const [cascade] = useState(() => !cascaded);
+  useEffect(() => { cascaded = true; }, []);
   const { me, friends, navigate, toast, unread, openPlanner, setChatUnread, loadUnread } = useApp();
   const loc = useLocation();
   const [convs, setConvs] = useState(() => cached('convs') || null); // last visit's list, shown at once
@@ -126,7 +162,6 @@ export default function Chats({ archivedView = false }) {
   const [name, setName] = useState('');
   const [hold, setHold] = useState(null); // chat whose menu is open
   const [sub, setSub] = useState(null); // 'mute' | 'lists' inside that menu
-  const [openId, setOpenId] = useState(null);
   const [leaving, setLeaving] = useState({});
   const [ask, setAsk] = useState(null);
   const [invite, setInvite] = useState(false);
@@ -137,11 +172,17 @@ export default function Chats({ archivedView = false }) {
   }).catch(() => setConvs((c) => c || []));
   const loadLists = () => get('/lists').then((r) => { setLists(r.lists); cache('lists', r.lists); }).catch(() => {});
   useEffect(() => { load(); loadLists(); }, [loc.pathname]); // eslint-disable-line
-  useSocket('message', load);
-  useSocket('message:update', load);
-  useSocket('read', load);
-  useSocket('conversations:changed', load);
-  useSocket('presence', load);
+  // Bursts of events (a group chatting) refresh the list once, not once each.
+  const soon = useRef(0);
+  const reload = () => { clearTimeout(soon.current); soon.current = setTimeout(load, 180); };
+  useEffect(() => () => clearTimeout(soon.current), []);
+  useSocket('message', reload);
+  useSocket('message:update', reload);
+  useSocket('read', reload);
+  useSocket('conversations:changed', reload);
+  // Someone coming online only changes their dot: no need to ask the server again.
+  useSocket('presence', (p) => setConvs((xs) => xs && xs.map((c) => (c.members.some((m) => m.id === p.id && !m.me)
+    ? { ...c, members: c.members.map((m) => (m.id === p.id && !m.me ? { ...m, ...p } : m)) } : c))));
   useSocket('typing', (p) => {
     setTyping((t) => ({ ...t, [p.conversation_id]: p.user }));
     clearTimeout(timers.current[p.conversation_id]);
@@ -168,7 +209,6 @@ export default function Chats({ archivedView = false }) {
     load(); loadUnread();
   };
   const archive = (c) => {
-    setOpenId(null);
     const to = !c.archived;
     setLeaving((l) => ({ ...l, [c.id]: true }));
     setTimeout(async () => {
@@ -178,7 +218,6 @@ export default function Chats({ archivedView = false }) {
     toast({ title: to ? 'Chat archived' : 'Chat unarchived', icon: 'archive', ms: 4000, action: { label: 'Undo', run: () => setMine(c, { archived: !to }, { archived: !to }) } });
   };
   const toggleRead = (c) => {
-    setOpenId(null);
     if (c.unread > 0 || c.marked_unread) {
       local(c.id, { unread: 0, marked_unread: false });
       post(`/conversations/${c.id}/read`).then(() => { load(); loadUnread(); }).catch(() => {});
@@ -214,6 +253,7 @@ export default function Chats({ archivedView = false }) {
     const others = c.members.filter((u) => !u.me);
     if (m.kind === 'deleted') return <span className="deleted-line"><Icon name="block" size={15} />{mine ? 'You deleted this message' : 'This message was deleted'}</span>;
     if (m.kind === 'system') return <span>{m.body}</span>;
+    if (m.kind === 'nudge') return <span className="media-line"><Icon name="bell" size={15} />{mine ? 'You asked them to turn on notifications' : 'Asked you to turn on notifications'}</span>;
     const read = mine && others.length && others.every((u) => (c.reads?.[u.id] || '') >= m.created_at);
     const body = m.kind === 'plan' ? `Plan: ${m.body}` : m.body;
     return (
@@ -317,7 +357,7 @@ export default function Chats({ archivedView = false }) {
           </button>
         )}
         {ai && filter === 'all' && !q && !archivedView && (
-          <button className="row-item enter" style={{ '--i': 0 }} onClick={() => navigate(`/chat/${ai.id}`)}>
+          <button className={`row-item ${cascade ? 'enter' : ''}`} style={{ '--i': 0 }} onClick={() => navigate(`/chat/${ai.id}`)}>
             <Orb size={52} />
             <span className="grow">
               <span className="line1"><b>Planner</b><small className={ai.unread ? 'accent' : ''}>{when(ai.last_message?.created_at)}</small></span>
@@ -327,9 +367,9 @@ export default function Chats({ archivedView = false }) {
           </button>
         )}
         {list.map((c, idx) => (
-          <SwipeRow key={c.id} c={c} leaving={leaving[c.id]} openId={openId} setOpenId={setOpenId}
+          <SwipeRow key={c.id} c={c} leaving={leaving[c.id]}
             onOpen={() => navigate(`/chat/${c.id}`)} onHold={() => setHold(c)} onArchive={() => archive(c)} onRead={() => toggleRead(c)} onMore={() => setHold(c)}>
-            <span className="row-inner enter" style={{ '--i': Math.min(idx + 1, 12) }}>{rowBody(c)}</span>
+            <span className={`row-inner ${cascade ? 'enter' : ''}`} style={{ '--i': Math.min(idx + 1, 8) }}>{rowBody(c)}</span>
           </SwipeRow>
         ))}
       </div>

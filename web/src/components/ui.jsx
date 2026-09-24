@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AVATARS, avatarUrl, sceneUrl, emojiUrl, EMOJI_IDS } from '../lib/art.js';
 import { NavLink, useLocation } from 'react-router-dom';
 import { STATUS, useApp } from '../lib/store.jsx';
@@ -162,17 +162,49 @@ export function TabBar() {
   );
 }
 
+/* In-app banners: they drop in just under the top bar (so its buttons stay tappable),
+   go away on their own, and can be flicked up or sideways to dismiss. */
+function Banner({ t, onDismiss, onOpen }) {
+  const ref = useRef(null);
+  const g = useRef(null);
+  const [out, setOut] = useState('');
+  const move = (dx, dy) => { if (ref.current) ref.current.style.transform = `translate3d(${dx}px, ${Math.min(0, dy)}px, 0)`; };
+  const down = (e) => { g.current = { x: e.clientX, y: e.clientY, id: e.pointerId, moved: false }; try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ } };
+  const onMove = (e) => {
+    const s = g.current;
+    if (!s || s.id !== e.pointerId) return;
+    const dx = e.clientX - s.x, dy = e.clientY - s.y;
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) s.moved = true;
+    if (s.moved) move(Math.abs(dx) > Math.abs(dy) ? dx : 0, Math.abs(dy) >= Math.abs(dx) ? dy : 0);
+  };
+  const up = (e) => {
+    const s = g.current;
+    g.current = null;
+    if (!s) return;
+    const dx = e.clientX - s.x, dy = e.clientY - s.y;
+    if (!s.moved) return onOpen();
+    if (dy < -24 || Math.abs(dx) > 70) { setOut(dy < -24 ? 'up' : dx > 0 ? 'right' : 'left'); setTimeout(onDismiss, 200); }
+    else if (ref.current) { ref.current.style.transition = 'transform .3s var(--spring)'; move(0, 0); setTimeout(() => { if (ref.current) ref.current.style.transition = ''; }, 320); }
+  };
+  return (
+    <div ref={ref} role="button" tabIndex={0} className={`toast island ${out ? `out-${out}` : ''}`}
+      onPointerDown={down} onPointerMove={onMove} onPointerUp={up} onPointerCancel={() => { g.current = null; move(0, 0); }}
+      onKeyDown={(e) => e.key === 'Enter' && onOpen()}>
+      {t.user ? <Avatar user={t.user} size={36} /> : t.planner ? <Orb size={36} /> : <span className="island-ic"><Icon name={t.icon || 'bell'} size={17} /></span>}
+      <span className="grow"><strong className="ellipsis">{t.title}</strong>{t.body && <span className="ellipsis">{t.body}</span>}</span>
+      {t.action && <button type="button" className="island-btn" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); onDismiss(); t.action.run(); }}>{t.action.label}</button>}
+    </div>
+  );
+}
+
 export function Toasts() {
   const { toasts, dismissToast, navigate } = useApp();
   const { pathname } = useLocation();
   return (
     <div className="toasts island-wrap">
       {toasts.filter((t) => t.url !== pathname).map((t) => (
-        <div key={t.tid} role="button" tabIndex={0} className="toast island" onClick={() => { dismissToast(t.tid); t.url && navigate(t.url); }}>
-          {t.user ? <Avatar user={t.user} size={36} /> : t.planner ? <Orb size={36} /> : <span className="island-ic"><Icon name={t.icon || 'bell'} size={17} /></span>}
-          <span className="grow"><strong className="ellipsis">{t.title}</strong>{t.body && <span className="ellipsis">{t.body}</span>}</span>
-          {t.action && <button type="button" className="island-btn" onClick={(e) => { e.stopPropagation(); dismissToast(t.tid); t.action.run(); }}>{t.action.label}</button>}
-        </div>
+        <Banner key={t.tid} t={t} onDismiss={() => dismissToast(t.tid)} onOpen={() => { dismissToast(t.tid); if (t.url) navigate(t.url); }} />
       ))}
     </div>
   );
@@ -197,7 +229,7 @@ export function Header({ title, sub, right, back, left }) {
         <button className="back-btn" onClick={() => (window.history.length > 1 ? window.history.back() : navigate(back))} aria-label="Back">
           <Icon name="left" size={26} />
         </button>
-      ) : left}
+      ) : left || <span className="header-left" />}
       <div className="grow">
         {title && <h1>{title}</h1>}
         {sub && <div className="subtitle">{sub}</div>}

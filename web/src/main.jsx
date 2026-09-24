@@ -7,7 +7,6 @@ import UpdatePrompt from './components/UpdatePrompt.jsx';
 import PushPrompt from './components/PushPrompt.jsx';
 import { post } from './lib/api.js';
 import IncomingInvite from './components/IncomingInvite.jsx';
-import Login from './pages/Login.jsx';
 import Chats, { Archived } from './pages/Chats.jsx';
 import ChatRoom from './pages/ChatRoom.jsx';
 import './styles.css';
@@ -66,6 +65,7 @@ const EventPage = lazy(screens.EventPage);
 const Alerts = lazy(screens.Alerts);
 const Call = lazy(screens.Call);
 const InvitePage = lazy(screens.InvitePage);
+const Login = lazy(() => import('./pages/Login.jsx'));
 const warm = () => Object.values(screens).forEach((load) => load().catch(() => {}));
 (window.requestIdleCallback || ((f) => setTimeout(f, 1200)))(warm);
 
@@ -122,7 +122,7 @@ function Shell() {
   const [activeCall, setActiveCall] = useState(null);
   useEffect(() => { if (onCall) setActiveCall(onCall); }, [onCall]);
 
-  if (!token) return <><Splash /><Login /><Toasts /><UpdatePrompt /></>;
+  if (!token) return <><Splash /><Suspense fallback={<div className="page-wait" />}><Login /></Suspense><Toasts /><UpdatePrompt /></>;
   const fullScreen = !!onCall || /^\/chat\/[^/]+$/.test(loc.pathname);
   const showTabs = TAB_ROOTS.includes(loc.pathname);
   const pill = activeCall && onCall !== activeCall;

@@ -3,7 +3,17 @@ import { get, post } from '../lib/api.js';
 import { useApp } from '../lib/store.jsx';
 import { startAuthentication, browserSupportsWebAuthn } from '@simplewebauthn/browser';
 import { Avatar, Icon } from '../components/ui.jsx';
-import { sceneUrl } from '../lib/art.js';
+import { emojiUrl } from '../lib/art.js';
+
+// The app's own emoji, orbiting the logo on the welcome screen.
+const ORBIT = ['love', 'lol', 'party', 'cheers', 'hype', 'braai', 'omw', 'free'];
+const PICS = ['sprout', 'mochi', 'hop', 'pip', 'bo', 'lulu', 'ribbit', 'kit', 'hoot', 'bolt', 'zib', 'pan', 'waddle', 'rex', 'honey', 'nimbus', 'inky', 'fluff', 'koko'];
+const PERKS = [
+  ['lol', 'Chat like you do', 'Photos, voice notes, stickers and GIFs'],
+  ['omw', 'Calls that ring', 'Video call anyone, even when their app is closed'],
+  ['free', "See who's free", 'Plan around everyone, not over them'],
+  ['party', 'Planner does the planning', 'Ask anything. It finds a time and books it'],
+];
 import { savedAccounts, forgetAccount } from '../lib/accounts.js';
 import { setToken } from '../lib/api.js';
 
@@ -19,6 +29,8 @@ export default function Login() {
   const [accounts, setAccounts] = useState(savedAccounts);
   const [linking, setLinking] = useState(!!linkFromPath());
   const [f, setF] = useState({ username: '', display_name: '', password: '', code: '' });
+  const [pics] = useState(() => [...PICS].sort(() => Math.random() - 0.5).slice(0, 6));
+  const [pic, setPic] = useState(() => pics[0]);
   const [show, setShow] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -65,7 +77,7 @@ export default function Login() {
     e.preventDefault();
     setErr(''); setBusy(true);
     try {
-      const body = step === 'login' ? { username: f.username, password: f.password } : { ...f, invite };
+      const body = step === 'login' ? { username: f.username, password: f.password } : { ...f, invite, avatar: pic };
       const r = await post(step === 'login' ? '/auth/login' : '/auth/register', body);
       login(r.token, r.user);
     } catch (x) {
@@ -80,9 +92,16 @@ export default function Login() {
       <div className="blobs" aria-hidden="true"><i /><i /><i /></div>
 
       <div className={`login-hero ${step !== 'welcome' ? 'up' : ''}`}>
-        <div className="float"><img className="login-logo" src="/brand/logo.svg" alt="" width={step === 'welcome' ? 120 : 76} height={step === 'welcome' ? 120 : 76} draggable="false" /></div>
+        <div className="orbit" aria-hidden="true">
+          {ORBIT.map((e, i) => (
+            <span key={e} className="orbit-item" style={{ '--a': `${(i / ORBIT.length) * 360 - 90}deg`, '--d': `${i * 70}ms`, '--f': `${3.2 + (i % 3) * 0.6}s` }}>
+              <img src={emojiUrl(e)} alt="" draggable="false" />
+            </span>
+          ))}
+          <img className="login-logo" src="/brand/logo.svg" alt="" draggable="false" />
+        </div>
         <h1 className="wordmark" aria-label="Linkup">{'Linkup'.split('').map((c, i) => <span key={i} style={{ animationDelay: `${120 + i * 60}ms` }}>{c}</span>)}</h1>
-        <p className="tagline">Your people. Your plans. One chat.</p>
+        <p className="tagline">Chat, call and plan with your people.</p>
       </div>
 
       {inviter && (
@@ -103,14 +122,13 @@ export default function Login() {
               ))}
             </div>
           )}
-          <img className="hello-cast" src={sceneUrl('hello')} alt="" draggable="false" />
-          <button className="btn primary block big-btn" onClick={() => setStep('register')}>Create account</button>
-          <button className="btn quiet block" onClick={() => setStep('login')}>I already have an account</button>
           <ul className="perks">
-            <li><Icon name="chat" size={18} />Chat, send photos and voice notes, video call</li>
-            <li><Icon name="cal" size={18} />See who's free and plan together</li>
-            <li><Icon name="spark" size={18} />Ask Planner anything. It books plans and reminds everyone</li>
+            {PERKS.map(([e, t, d], i) => (
+              <li key={t} style={{ '--i': i }}><span className="perk-ic"><img src={emojiUrl(e)} alt="" draggable="false" /></span><span><b>{t}</b><small>{d}</small></span></li>
+            ))}
           </ul>
+          <button className="btn primary block big-btn" onClick={() => setStep('register')}>Create account</button>
+          <button className="btn block big-btn outline-btn" onClick={() => setStep('login')}>I already have an account</button>
         </div>
       ) : (
         <form key={shake} onSubmit={submit} className={`login-card ${shake ? 'shake' : ''}`}>
@@ -118,6 +136,15 @@ export default function Login() {
             <button type="button" className={step === 'register' ? 'on' : ''} onClick={() => { setStep('register'); setErr(''); }}>Create account</button>
             <button type="button" className={step === 'login' ? 'on' : ''} onClick={() => { setStep('login'); setErr(''); }}>Sign in</button>
           </div>
+          {step === 'register' && (
+            <div className="pic-pick" role="radiogroup" aria-label="Your picture">
+              {pics.map((p) => (
+                <button key={p} type="button" role="radio" aria-checked={pic === p} className={pic === p ? 'on' : ''} onClick={() => setPic(p)}>
+                  <Avatar user={{ avatar: p, display_name: f.display_name || 'You' }} size={40} />
+                </button>
+              ))}
+            </div>
+          )}
           <label className="field">
             <input ref={userRef} autoComplete="username" autoCapitalize="none" autoCorrect="off" placeholder=" " value={f.username} onChange={set('username')} required />
             <span>Username</span>

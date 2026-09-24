@@ -4,30 +4,56 @@ import { TZ, nextDays, zonedToDate, dateKey, timeKey } from './time.js';
 const BASE = (process.env.LLM_BASE_URL || 'http://localhost:11434/v1').replace(/\/$/, '');
 const MODEL = process.env.LLM_MODEL || 'llama3.2:3b';
 const KEY = process.env.LLM_API_KEY || 'ollama';
+// Optional backup model (any OpenAI-compatible API), used when the main one can't answer, e.g. the PC is off.
+const FALLBACK = process.env.LLM_FALLBACK_BASE_URL ? {
+  base: process.env.LLM_FALLBACK_BASE_URL.replace(/\/$/, ''), model: process.env.LLM_FALLBACK_MODEL || MODEL, key: process.env.LLM_FALLBACK_API_KEY || '', json: true,
+} : null;
 // On Vercel the function itself stops at 300s, so give up on the model a little before that.
-const TIMEOUT = Math.min(Number(process.env.LLM_TIMEOUT_MS || 180000), process.env.VERCEL ? 280000 : Infinity);
-let jsonMode = process.env.LLM_JSON_MODE !== 'false';
+// With a backup model, give the main one less time so the backup still has a chance.
+const LIMIT = Math.min(Number(process.env.LLM_TIMEOUT_MS || 180000), process.env.VERCEL ? 280000 : Infinity);
+const TIMEOUT = FALLBACK ? Math.min(LIMIT, 90000) : LIMIT;
+const PRIMARY = { base: BASE, model: MODEL, key: KEY, json: process.env.LLM_JSON_MODE !== 'false' };
 
-export const aiInfo = { base: BASE, model: MODEL, key: KEY };
+export const aiInfo = { base: BASE, model: MODEL, key: KEY, fallback: FALLBACK ? FALLBACK.model : null };
 // On Vercel, a localhost model URL can only mean LLM_BASE_URL was never set.
-export const aiMisconfigured = !!process.env.VERCEL && /^https?:\/\/(localhost|127\.|0\.0\.0\.0)/.test(BASE);
+export const aiMisconfigured = !!process.env.VERCEL && /^https?:\/\/(localhost|127\.|0\.0\.0\.0)/.test(BASE) && !FALLBACK;
+const headersFor = (ep) => ({ Authorization: `Bearer ${ep.key}`, 'ngrok-skip-browser-warning': '1' });
 // Sent on every call: ngrok's free tunnels show a warning page unless asked not to.
-export const aiHeaders = { Authorization: `Bearer ${KEY}`, 'ngrok-skip-browser-warning': '1' };
+export const aiHeaders = headersFor(PRIMARY);
+
+/** A model server's error, kept short: never a whole HTML page. */
+function httpError(status, text) {
+  let msg = text;
+  try { msg = JSON.parse(text).error?.message || JSON.parse(text).error || text; } catch { /* not JSON */ }
+  if (/<(!doctype|html)/i.test(String(msg))) msg = '';
+  return Object.assign(new Error(`HTTP ${status}${msg ? `: ${String(msg).slice(0, 160)}` : ''}`), { kind: 'http', status, body: String(text).slice(0, 4000) });
+}
 
 /**
  * One call to the model. json: ask for a JSON object (plan extraction). stream + onText: get the reply
  * as it's written, for servers that stream (LM Studio, Ollama); others just answer at the end.
+ * If the main model fails and a backup is set up, the backup answers instead.
  */
-async function chat(messages, { json = false, stream = false, temperature = 0.2, onText } = {}) {
+async function chat(messages, opts = {}) {
+  try {
+    return await callModel(PRIMARY, messages, { ...opts, timeout: TIMEOUT });
+  } catch (e) {
+    if (!FALLBACK) throw e;
+    console.warn('[ai] main model failed, using the backup:', e.message);
+    return callModel(FALLBACK, messages, { ...opts, timeout: Math.max(30000, LIMIT - TIMEOUT) });
+  }
+}
+
+async function callModel(ep, messages, { json = false, stream = false, temperature = 0.2, onText, timeout } = {}) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT);
-  const useJson = () => json && jsonMode;
-  const send = () => fetch(`${BASE}/chat/completions`, {
+  const t = setTimeout(() => ctrl.abort(), timeout);
+  const useJson = () => json && ep.json;
+  const send = () => fetch(`${ep.base}/chat/completions`, {
     method: 'POST',
     signal: ctrl.signal,
-    headers: { 'Content-Type': 'application/json', ...aiHeaders },
+    headers: { 'Content-Type': 'application/json', ...headersFor(ep) },
     body: JSON.stringify({
-      model: MODEL,
+      model: ep.model,
       messages,
       temperature,
       stream,
@@ -39,10 +65,10 @@ async function chat(messages, { json = false, stream = false, temperature = 0.2,
     // Some servers (LM Studio) reject JSON mode. The prompt already asks for JSON, so retry without it.
     if (res.status === 400 && useJson()) {
       const text = await res.text();
-      if (/response_format|json/i.test(text)) { jsonMode = false; res = await send(); }
-      else throw Object.assign(new Error(`HTTP 400: ${text.slice(0, 160)}`), { kind: 'http' });
+      if (/response_format|json/i.test(text)) { ep.json = false; res = await send(); }
+      else throw httpError(400, text);
     }
-    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`), { kind: 'http' });
+    if (!res.ok) throw httpError(res.status, await res.text());
     if (!stream || !/event-stream/.test(res.headers.get('content-type') || '')) {
       const j = await res.json();
       return j.choices?.[0]?.message?.content || '';
@@ -76,12 +102,26 @@ async function chat(messages, { json = false, stream = false, temperature = 0.2,
   }
 }
 
+/** Ask the model for one JSON object (used by the calendar's Planner bar). Returns null if it can't. */
+export async function askJSON(system, user) {
+  const raw = await chat([{ role: 'system', content: system }, { role: 'user', content: user }], { json: true, temperature: 0.1 });
+  return extractJSON(raw);
+}
+
 /** Why Planner couldn't answer, in words the chat can show. */
 export function aiErrorText(e) {
   if (aiMisconfigured && e?.kind !== 'http') return 'LLM_BASE_URL is not set on the server';
-  if (e?.name === 'AbortError') return 'the model took too long';
-  if (e?.kind === 'http') return `the model server said ${e.message}`;
-  return 'cannot reach the model server';
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return 'the model took too long to answer';
+  if (e?.kind === 'http') {
+    const body = e.body || '';
+    if (/ngrok/i.test(body) && /offline|ERR_NGROK_3200|ERR_NGROK_8012|not found/i.test(body)) return 'the computer running me is offline (start LM Studio and the ngrok tunnel on it)';
+    if (/tailscale|funnel/i.test(body)) return 'the computer running me is offline (check Tailscale Funnel on it)';
+    if (e.status === 404) return "the model server isn't at that address (LLM_BASE_URL should end in /v1)";
+    if (e.status === 401 || e.status === 403) return 'the model server turned down the key (check LLM_API_KEY)';
+    if (e.status === 502 || e.status === 503 || e.status === 504) return "the computer running me isn't answering";
+    return `the model server had a problem (${e.message.slice(0, 120)})`;
+  }
+  return "the computer running me can't be reached";
 }
 
 function extractJSON(text) {

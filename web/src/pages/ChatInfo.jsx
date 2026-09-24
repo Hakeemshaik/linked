@@ -137,6 +137,12 @@ export default function ChatInfo() {
         <Cell icon="star" color="#E8A21B" title="Starred messages" value={counts.starred || 'None'} onClick={() => navigate(`/chat/${id}/starred`)} />
       </div>
 
+      {!group && other && info.notifications === false && (
+        <div className="group-list">
+          <Cell icon="bellOff" color="#E8A21B" title={`${other.display_name.split(' ')[0]} has notifications off`} sub="Your calls and messages won't reach their lock screen" chevron={false}
+            right={<button className="btn small" onClick={async (e) => { e.stopPropagation(); try { await post(`/nudges/${other.id}`); toast({ title: `Nudged ${other.display_name.split(' ')[0]}` }); } catch (x) { toast({ title: 'Not sent', body: x.message }); } }}>Nudge</button>} />
+        </div>
+      )}
       <div className="group-list">
         <Cell icon={c.muted ? 'bellOff' : 'bell'} color="#3CC47C" title="Notifications" value={c.muted ? `Muted · ${mutedLabel(c)}` : 'On'} onClick={() => setSheet('mute')} />
         <Cell icon="wallpaper" color="#E3569E" title="Chat theme" value={(THEMES.find(([k]) => k === (c.theme || 'default')) || THEMES[0])[1]} onClick={() => setSheet('theme')} />
@@ -199,14 +205,19 @@ export default function ChatInfo() {
       </Sheet>
 
       <Sheet open={sheet === 'theme'} onClose={() => setSheet(null)} title="Chat theme">
-        <p className="muted small center">Only you see this.</p>
+        <div className={`preview-chat wallpaper theme-${c.theme || 'default'}`}>
+          <div className="row-msg in first"><div className="bubble"><span className="text">This is how your chat looks</span><span className="meta">18:02</span></div></div>
+          <div className="row-msg out first"><div className="bubble"><span className="text">Only you see it</span><span className="meta">18:03</span></div></div>
+        </div>
         <div className="theme-grid">
           {THEMES.map(([k, label]) => (
-            <button key={k} className={`theme-swatch wallpaper theme-${k} ${(c.theme || 'default') === k ? 'on' : ''}`} onClick={() => { setSheet(null); setMine({ theme: k }); }}>
+            <button key={k} className={`theme-swatch wallpaper theme-${k} ${(c.theme || 'default') === k ? 'on' : ''}`}
+              onClick={() => { setInfo((x) => ({ ...x, conversation: { ...x.conversation, theme: k === 'default' ? null : k } })); setMine({ theme: k }); }}>
               <span className="sw-in" /><span className="sw-out" /><b>{label}</b>
             </button>
           ))}
         </div>
+        <button className="btn primary block" onClick={() => setSheet(null)}>Done</button>
       </Sheet>
 
       <Sheet open={sheet === 'lists'} onClose={() => setSheet(null)} title="Add to list">
